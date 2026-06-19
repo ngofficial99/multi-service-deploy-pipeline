@@ -1,3 +1,18 @@
+locals {
+  # DEMO (highly_available=false): one zone, so a regional MIG behaves zonally
+  # and costs the least. PROD (true): spread across 3 zones for real HA.
+  mig_zones = var.highly_available ? [
+    "${var.region}-a", "${var.region}-b", "${var.region}-c"
+  ] : [var.zone]
+
+  # max_surge_fixed must be a multiple of the spanned zone count.
+  mig_surge = length(local.mig_zones)
+
+  # Instance redistribution only applies to a multi-zone regional MIG; it must
+  # be NONE when the group spans a single zone, or GCP rejects the apply.
+  mig_redistribution = var.highly_available ? "PROACTIVE" : "NONE"
+}
+
 # --- Instance templates (immutable VM blueprints) ---
 # Linux services (backend, frontend): boot Debian, cloud-init installs the
 # reconciler which converges to the desired digest in deploy-state.
@@ -96,11 +111,13 @@ resource "google_compute_health_check" "frontend" {
   unhealthy_threshold = 3
 }
 
-# --- Regional MIGs (the "ASGs"), one per service, across 3 zones ---
+# --- Regional MIGs (the "ASGs"), one per service. Span 1 zone (demo) or 3
+#     zones (highly_available=true), controlled by distribution_policy_zones. ---
 resource "google_compute_region_instance_group_manager" "backend" {
-  name               = "hanomi-backend-mig"
-  region             = var.region
-  base_instance_name = "hanomi-backend"
+  name                      = "hanomi-backend-mig"
+  region                    = var.region
+  base_instance_name        = "hanomi-backend"
+  distribution_policy_zones = local.mig_zones
 
   version {
     instance_template = google_compute_instance_template.linux["backend"].id
@@ -120,17 +137,18 @@ resource "google_compute_region_instance_group_manager" "backend" {
   # Health-gated rolling updates: never take everything down at once.
   update_policy {
     type                         = "PROACTIVE"
-    instance_redistribution_type = "PROACTIVE"
+    instance_redistribution_type = local.mig_redistribution
     minimal_action               = "REPLACE"
-    max_surge_fixed              = 3
+    max_surge_fixed              = local.mig_surge
     max_unavailable_fixed        = 0
   }
 }
 
 resource "google_compute_region_instance_group_manager" "frontend" {
-  name               = "hanomi-frontend-mig"
-  region             = var.region
-  base_instance_name = "hanomi-frontend"
+  name                      = "hanomi-frontend-mig"
+  region                    = var.region
+  base_instance_name        = "hanomi-frontend"
+  distribution_policy_zones = local.mig_zones
 
   version {
     instance_template = google_compute_instance_template.linux["frontend"].id
@@ -148,29 +166,30 @@ resource "google_compute_region_instance_group_manager" "frontend" {
 
   update_policy {
     type                         = "PROACTIVE"
-    instance_redistribution_type = "PROACTIVE"
+    instance_redistribution_type = local.mig_redistribution
     minimal_action               = "REPLACE"
-    max_surge_fixed              = 3
+    max_surge_fixed              = local.mig_surge
     max_unavailable_fixed        = 0
   }
 }
 
 resource "google_compute_region_instance_group_manager" "worker" {
-  name               = "hanomi-worker-mig"
-  region             = var.region
-  base_instance_name = "hanomi-worker"
+  name                      = "hanomi-worker-mig"
+  region                    = var.region
+  base_instance_name        = "hanomi-worker"
+  distribution_policy_zones = local.mig_zones
 
   version {
     instance_template = google_compute_instance_template.worker.id
   }
 
   # No LB health check (pull-based). Rolling replace on template change.
-  # max_surge_fixed must be a multiple of the spanned zone count (3).
+  # max_surge_fixed must be a multiple of the spanned zone count.
   update_policy {
     type                         = "PROACTIVE"
-    instance_redistribution_type = "PROACTIVE"
+    instance_redistribution_type = local.mig_redistribution
     minimal_action               = "REPLACE"
-    max_surge_fixed              = 3
+    max_surge_fixed              = local.mig_surge
     max_unavailable_fixed        = 0
   }
 }

@@ -209,11 +209,15 @@ behind a load balancer** — one independently-scaling group per service.
 
 **One MIG per service, scaling independently:**
 
-| Service | Scales horizontally on | Load balancer | Min/Max |
+| Service | Scales horizontally on | Load balancer | Min/Max (demo) |
 |---|---|---|---|
-| frontend | HTTP LB utilization (0.7) | **External** L7 HTTPS | 2 → 10 |
-| backend | HTTP LB utilization | **Internal** L7 (frontend-only, never public) | 2 → 8 |
-| worker | **queue depth** — `single_instance_assignment` over a `pending_leads` custom metric | none (pull-based) | **0** → 6 |
+| frontend | HTTP LB utilization (0.7) | **External** L7 HTTPS | 1 → 2 |
+| backend | HTTP LB utilization | **Internal** L7 (frontend-only, never public) | 1 → 2 |
+| worker | **queue depth** — `single_instance_assignment` over a `pending_leads` custom metric | none (pull-based) | **0** → 2 |
+
+Sizes are kept small and **single-region / single-zone by default** (the
+`highly_available` flag, off for the demo) to keep cost minimal; flip the flag
+and raise the maxes in `terraform.tfvars` for production HA.
 
 - **Horizontal:** automatic via each MIG's autoscaler. The worker is the elegant
   case — it's a pull-based consumer (`FOR UPDATE SKIP LOCKED`), so running many
@@ -223,9 +227,10 @@ behind a load balancer** — one independently-scaling group per service.
   health-gated rolling replace. (Live vertical resize of plain VMs isn't a GCE
   feature — that's GKE VPA, which the brief excluded. GCE gives right-sizing
   *recommendations* you apply this way.)
-- **Resilience:** regional MIGs spread instances across 3 zones with autohealing
-  (replace unhealthy instances) and rolling updates (`max_surge`/`max_unavailable`,
-  health-gated). This **eliminates the single-VM restart-blip** of the root design.
+- **Resilience:** autohealing (replace unhealthy instances) + health-gated
+  rolling updates (`max_surge`/`max_unavailable`) **eliminate the single-VM
+  restart-blip** of the root design. The `highly_available` flag (off for the
+  demo) spreads instances across 3 zones for real HA when you want it.
 - **The GitOps reconciler is unchanged:** every new MIG instance boots from the
   template, installs the reconciler, and converges to the digest in
   `deploy-state`. Scaling out is free. The only rollout-gate change is gating on

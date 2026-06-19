@@ -4,6 +4,19 @@ variable "region" {
   default = "asia-south1"
 }
 
+variable "zone" {
+  type        = string
+  default     = "asia-south1-a"
+  description = "Single zone used when highly_available = false (demo/cheap mode)."
+}
+
+# DEMO DEFAULT = false: zonal MIGs in ONE zone (cheap, fewer VMs, single region).
+# Flip to true for production: regional MIGs spread across 3 zones (real HA).
+variable "highly_available" {
+  type    = bool
+  default = false
+}
+
 # Wired from the root module's outputs / existing resources.
 variable "network_id" {
   type        = string
@@ -30,10 +43,10 @@ variable "scaling" {
     machine_type : string
   }))
   default = {
-    backend  = { min_replicas = 2, max_replicas = 8, machine_type = "e2-small" }
-    frontend = { min_replicas = 2, max_replicas = 10, machine_type = "e2-small" }
+    backend  = { min_replicas = 1, max_replicas = 2, machine_type = "e2-small" }
+    frontend = { min_replicas = 1, max_replicas = 2, machine_type = "e2-small" }
     # worker can scale to zero when the queue is empty.
-    worker = { min_replicas = 0, max_replicas = 6, machine_type = "e2-medium" }
+    worker = { min_replicas = 0, max_replicas = 2, machine_type = "e2-small" }
   }
 }
 

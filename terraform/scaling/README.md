@@ -15,11 +15,24 @@ equivalent of an AWS Auto Scaling Group behind a load balancer:
 
 **One MIG per service, scaling independently:**
 
-| Service | MIG | Scales on | Load balancer |
-|---|---|---|---|
-| frontend | regional, 3 zones | HTTP LB utilization | **External** L7 HTTPS |
-| backend | regional, 3 zones | HTTP LB utilization | **Internal** L7 (frontend-only) |
-| worker | regional, 3 zones (Windows) | **queue depth** (custom metric: pending leads) | none — pull-based, scales to zero |
+| Service | MIG | Scales on | Load balancer | Min→Max |
+|---|---|---|---|---|
+| frontend | regional | HTTP LB utilization | **External** L7 HTTPS | 1 → 2 |
+| backend | regional | HTTP LB utilization | **Internal** L7 (frontend-only) | 1 → 2 |
+| worker | regional (Windows) | **queue depth** (custom metric: pending leads) | none — pull-based | 0 → 2 |
+
+### Cost control: `highly_available` flag (default `false` for the demo)
+
+- **`highly_available = false` (default):** every MIG spans **one zone**
+  (`var.zone`) in a **single region**, min replicas are 1 (worker 0), max 2.
+  This is the cheap demo footprint — the fewest VMs that still demonstrate
+  autoscaling, LBs, and self-healing.
+- **`highly_available = true`:** MIGs spread across **3 zones** for real HA, with
+  proactive instance redistribution. Flip this (and bump the `scaling` maxes via
+  `terraform.tfvars`) for production. Nothing else changes — it is one flag.
+
+Tune everything in `variables.tf` (or override in `terraform.tfvars`):
+`scaling` (min/max/machine_type per service), `zone`, `highly_available`.
 
 ### Why each signal
 
