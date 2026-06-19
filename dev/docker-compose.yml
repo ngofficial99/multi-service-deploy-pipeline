@@ -10,5 +10,39 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hanomi"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+  backend:
+    build: ../apps/backend
+    environment:
+      DATABASE_URL: postgres://hanomi:devpassword@postgres:5432/hanomi?sslmode=disable
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+  worker:
+    build: ../apps/worker
+    environment:
+      DATABASE_URL: postgres://hanomi:devpassword@postgres:5432/hanomi?sslmode=disable
+      POLL_INTERVAL: "3"
+    volumes:
+      - ./outbox:/app/outbox
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+  frontend:
+    build: ../apps/frontend
+    environment:
+      BACKEND_URL: http://backend:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
 volumes:
   pgdata:
