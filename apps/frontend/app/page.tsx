@@ -1,4 +1,4 @@
-import DemoForm from "./DemoForm";
+import Link from "next/link";
 import { backendHealth } from "../lib/api";
 
 export const dynamic = "force-dynamic"; // always reflect live backend/worker status
@@ -17,11 +17,11 @@ export default async function Page() {
   return (
     <>
       <nav className="nav">
-        <div className="brand">
+        <Link href="/" className="brand">
           <span className="mark" />
           HANOMI
-        </div>
-        <DemoForm />
+        </Link>
+        <Link href="/try" className="btn btn-primary btn-sm">Try Hanomi →</Link>
       </nav>
 
       <header className="hero">
@@ -44,7 +44,7 @@ export default async function Page() {
           </p>
 
           <div className="hero-cta">
-            <DemoForm />
+            <Link className="btn btn-primary" href="/try">Try Hanomi →</Link>
             <a className="btn btn-ghost" href="#how">
               See how it works
             </a>
