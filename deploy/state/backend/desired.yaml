@@ -1,0 +1,2 @@
+service: backend
+image: REGION-docker.pkg.dev/PROJECT/hanomi/backend@sha256:REPLACED_BY_CI

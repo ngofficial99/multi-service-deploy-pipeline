@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Compute Engine startup script (rendered by Terraform per Linux VM).
+# Installs Podman + git, clones the deploy-state repo, installs the reconciler
+# timer, and kicks off the first reconcile. Idempotent across reboots.
+set -euo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y podman git curl
+
+install -d -m 0755 /opt/hanomi /etc/hanomi /var/lib/hanomi /etc/containers/systemd
+
+# Clone (or update) the GitOps desired-state repo.
+if [ ! -d /opt/hanomi/deploy-state/.git ]; then
+  git clone "${state_repo_url}" /opt/hanomi/deploy-state
+else
+  git -C /opt/hanomi/deploy-state pull --ff-only || true
+fi
+
+# Per-VM reconcile config.
+cat >/etc/hanomi/reconcile.env <<EOF
+SERVICE=${service}
+STATE_BUCKET=${state_bucket}
+EOF
+
+# Install the templated timer + service and enable for this service.
+cp /opt/hanomi/deploy-state/deploy/linux/hanomi-reconcile@.service /etc/systemd/system/
+cp /opt/hanomi/deploy-state/deploy/linux/hanomi-reconcile@.timer   /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now "hanomi-reconcile@${service}.timer"
+
+# Run one reconcile immediately so the VM converges on first boot.
+SERVICE="${service}" STATE_BUCKET="${state_bucket}" \
+  /opt/hanomi/deploy-state/deploy/linux/reconciler.sh || true

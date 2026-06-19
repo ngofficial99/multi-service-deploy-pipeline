@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Hanomi reconciler for %i every 60s
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+Unit=hanomi-reconcile@%i.service
+
+[Install]
+WantedBy=timers.target

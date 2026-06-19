@@ -1,0 +1,2 @@
+service: frontend
+image: REGION-docker.pkg.dev/PROJECT/hanomi/frontend@sha256:REPLACED_BY_CI

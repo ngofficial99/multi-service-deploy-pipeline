@@ -1,0 +1,21 @@
+# Quadlet unit template for the frontend (Next.js standalone server).
+[Unit]
+Description=Hanomi frontend
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=__IMAGE__
+EnvironmentFile=__ENVFILE__
+PublishPort=3000:3000
+HealthCmd=wget -qO- http://localhost:3000/api/health || exit 1
+HealthInterval=10s
+HealthRetries=3
+HealthOnFailure=kill
+
+[Service]
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target default.target

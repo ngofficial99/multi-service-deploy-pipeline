@@ -1,0 +1,18 @@
+# Windows VM startup script (rendered by Terraform). Clones the deploy-state
+# repo if needed, then runs the idempotent bootstrap.
+$ErrorActionPreference = "Stop"
+$base = "C:\hanomi"
+New-Item -ItemType Directory -Force -Path $base | Out-Null
+
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+  winget install -e --id Git.Git --silent `
+    --accept-package-agreements --accept-source-agreements
+}
+if (-not (Test-Path "$base\deploy-state\.git")) {
+  git clone "${state_repo_url}" "$base\deploy-state"
+}
+
+& "$base\deploy-state\deploy\windows\bootstrap.ps1" `
+  -StateRepoUrl "${state_repo_url}" `
+  -StateBucket "${state_bucket}" `
+  -ArtifactBucket "${artifact_bucket}"

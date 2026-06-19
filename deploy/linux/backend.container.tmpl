@@ -1,0 +1,25 @@
+# Quadlet unit template for the backend. The reconciler substitutes __IMAGE__
+# and __ENVFILE__, writes the result to /etc/containers/systemd/backend.container,
+# then runs `systemctl daemon-reload` so Quadlet generates the systemd service.
+[Unit]
+Description=Hanomi backend
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=__IMAGE__
+EnvironmentFile=__ENVFILE__
+PublishPort=8080:8080
+# Container-level self-heal: restart when the in-container healthcheck fails.
+HealthCmd=wget -qO- http://localhost:8080/healthz || exit 1
+HealthInterval=10s
+HealthRetries=3
+HealthOnFailure=kill
+
+[Service]
+# systemd-level self-heal: restart on crash/exit.
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target default.target

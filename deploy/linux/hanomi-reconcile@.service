@@ -1,0 +1,10 @@
+[Unit]
+Description=Hanomi reconciler for %i (one-shot, converges to desired state)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SERVICE=%i
+EnvironmentFile=/etc/hanomi/reconcile.env
+ExecStart=/opt/hanomi/deploy-state/deploy/linux/reconciler.sh

@@ -1,0 +1,2 @@
+service: worker
+image: REGION-docker.pkg.dev/PROJECT/hanomi/worker@sha256:REPLACED_BY_CI
