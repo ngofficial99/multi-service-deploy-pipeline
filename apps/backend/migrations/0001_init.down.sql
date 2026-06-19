@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS worker_heartbeat;
+DROP TABLE IF EXISTS leads;
