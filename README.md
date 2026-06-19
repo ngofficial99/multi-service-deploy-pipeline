@@ -192,6 +192,47 @@ terraform init && terraform apply
 
 ---
 
+## Scaling & autoscaling (production module)
+
+The root design deploys one VM per service because the brief said so — but a
+single named VM per service is a single point of failure and cannot scale, so
+it is not production-ready. `terraform/scaling/` is the production evolution: it
+replaces each named VM with the GCP equivalent of an **AWS Auto Scaling Group
+behind a load balancer** — one independently-scaling group per service.
+
+| AWS | GCP (in `terraform/scaling/`) |
+|---|---|
+| Launch Template | Instance Template |
+| Auto Scaling Group | regional Managed Instance Group (MIG) |
+| ASG scaling policy | Autoscaler |
+| ALB + Target Group | Application (L7) Load Balancer + Backend Service |
+
+**One MIG per service, scaling independently:**
+
+| Service | Scales horizontally on | Load balancer | Min/Max |
+|---|---|---|---|
+| frontend | HTTP LB utilization (0.7) | **External** L7 HTTPS | 2 → 10 |
+| backend | HTTP LB utilization | **Internal** L7 (frontend-only, never public) | 2 → 8 |
+| worker | **queue depth** — `single_instance_assignment` over a `pending_leads` custom metric | none (pull-based) | **0** → 6 |
+
+- **Horizontal:** automatic via each MIG's autoscaler. The worker is the elegant
+  case — it's a pull-based consumer (`FOR UPDATE SKIP LOCKED`), so running many
+  copies is already safe; it scales on backlog (≈5 pending leads per worker) and
+  **scales to zero** when idle. CPU would be the wrong signal there.
+- **Vertical:** change `machine_type` in the instance template → the MIG does a
+  health-gated rolling replace. (Live vertical resize of plain VMs isn't a GCE
+  feature — that's GKE VPA, which the brief excluded. GCE gives right-sizing
+  *recommendations* you apply this way.)
+- **Resilience:** regional MIGs spread instances across 3 zones with autohealing
+  (replace unhealthy instances) and rolling updates (`max_surge`/`max_unavailable`,
+  health-gated). This **eliminates the single-VM restart-blip** of the root design.
+- **The GitOps reconciler is unchanged:** every new MIG instance boots from the
+  template, installs the reconciler, and converges to the digest in
+  `deploy-state`. Scaling out is free. The only rollout-gate change is gating on
+  **MIG + LB health** (≥ healthy threshold) instead of a single `actual.json`.
+
+See `terraform/scaling/README.md`.
+
 ## Repo layout & the "3 submodules"
 
 The brief specifies one parent repo with three git submodules. This submission
@@ -247,8 +288,9 @@ research, drafting, and verification.
 
 ## Known limitations (YAGNI)
 
-- Single VM per service → a brief restart blip on deploy (no instance to drain
-  to). Documented above, not hidden.
+- Single VM per service (root module) → a brief restart blip on deploy (no
+  instance to drain to). This is the literal brief answer; the production answer
+  is `terraform/scaling/` (MIGs + LBs), where rolling updates remove the blip.
 - Terraform uses local state for the take-home; a real setup uses a GCS backend.
 - Deploy latency is bounded by the ~60s poll interval (Pub/Sub push would cut
   this but adds infra not worth it here).
