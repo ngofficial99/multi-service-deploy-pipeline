@@ -14,10 +14,10 @@ export default function DemoForm() {
     setStatus("sending");
     const fd = new FormData(e.currentTarget);
     const payload = {
-      name: String(fd.get("name") ?? ""),
+      first_name: String(fd.get("first_name") ?? ""),
+      phone: String(fd.get("phone") ?? ""),
       email: String(fd.get("email") ?? ""),
       company: String(fd.get("company") ?? ""),
-      message: String(fd.get("message") ?? ""),
     };
     try {
       const res = await fetch("/api/leads", {
@@ -72,24 +72,23 @@ export default function DemoForm() {
             ) : (
               <form onSubmit={onSubmit} className="form">
                 <p className="form-lede">
-                  Schedule a demo to secure early access and see how teams
-                  generate shop-floor-ready 2D drawings.
+                  Tell us a bit about yourself so we can stay in touch.
                 </p>
                 <label>
-                  <span className="mono">name *</span>
-                  <input name="name" required placeholder="Jane Engineer" />
+                  <span className="mono">first name *</span>
+                  <input name="first_name" required placeholder="Jane" />
                 </label>
                 <label>
-                  <span className="mono">work email *</span>
-                  <input name="email" type="email" required placeholder="jane@company.com" />
+                  <span className="mono">phone number *</span>
+                  <input name="phone" type="tel" required placeholder="(201) 555-0123" />
                 </label>
                 <label>
-                  <span className="mono">company</span>
-                  <input name="company" placeholder="Acme Aerospace" />
+                  <span className="mono">email *</span>
+                  <input name="email" type="email" required placeholder="name@example.com" />
                 </label>
                 <label>
-                  <span className="mono">what are you building?</span>
-                  <textarea name="message" rows={3} placeholder="Parts, assemblies, CAD format…" />
+                  <span className="mono">company *</span>
+                  <input name="company" required placeholder="Acme Corporation" />
                 </label>
                 {status === "error" && <p className="form-err">⚠ {errMsg}</p>}
                 <button className="btn btn-primary" type="submit" disabled={status === "sending"}>

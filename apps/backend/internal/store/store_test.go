@@ -25,12 +25,11 @@ func TestMigrateAndCreateLead(t *testing.T) {
 	if err := s.Migrate(); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
-	company := "Acme"
-	lead, err := s.CreateLead(ctx, "Nishant", "nishant@example.com", &company, nil)
+	lead, err := s.CreateLead(ctx, "Jane", "(201) 555-0123", "jane@example.com", "Acme Corporation")
 	if err != nil {
 		t.Fatalf("CreateLead: %v", err)
 	}
-	if lead.ID == 0 || lead.Status != "pending" {
+	if lead.ID == 0 || lead.Status != "pending" || lead.InviteSent {
 		t.Fatalf("unexpected lead: %+v", lead)
 	}
 }

@@ -16,15 +16,21 @@ class Db:
                     SELECT id FROM leads WHERE status='pending'
                     ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1
                 )
-                RETURNING id, name, email
+                RETURNING id, first_name, email
                 """
             )
             return cur.fetchone()
 
     def mark_emailed(self, lead_id: int) -> None:
+        """Mark the lead emailed and record that the invite was sent."""
         with self.conn.cursor() as cur:
             cur.execute(
-                "UPDATE leads SET status='emailed', error=NULL, updated_at=now() WHERE id=%s",
+                """
+                UPDATE leads
+                SET status='emailed', invite_sent=true, invite_sent_at=now(),
+                    error=NULL, updated_at=now()
+                WHERE id=%s
+                """,
                 (lead_id,),
             )
 

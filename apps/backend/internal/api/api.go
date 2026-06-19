@@ -38,18 +38,16 @@ func RegisterHealth(r *gin.Engine, h HealthChecker) {
 func RegisterLeads(r *gin.Engine, s *store.Store) {
 	r.POST("/leads", func(c *gin.Context) {
 		var body struct {
-			Name    string `json:"name" binding:"required"`
-			Email   string `json:"email" binding:"required,email"`
-			Company string `json:"company"`
-			Message string `json:"message"`
+			FirstName string `json:"first_name" binding:"required"`
+			Phone     string `json:"phone" binding:"required"`
+			Email     string `json:"email" binding:"required,email"`
+			Company   string `json:"company" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		company := optional(body.Company)
-		message := optional(body.Message)
-		l, err := s.CreateLead(c.Request.Context(), body.Name, body.Email, company, message)
+		l, err := s.CreateLead(c.Request.Context(), body.FirstName, body.Phone, body.Email, body.Company)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -77,12 +75,4 @@ func RegisterLeads(r *gin.Engine, s *store.Store) {
 		}
 		c.JSON(http.StatusOK, l)
 	})
-}
-
-// optional turns an empty string into a nil pointer (for nullable columns).
-func optional(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
 }

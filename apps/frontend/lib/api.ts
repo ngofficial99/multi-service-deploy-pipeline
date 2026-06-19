@@ -5,11 +5,13 @@ export const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8080";
 
 export type Lead = {
   id: number;
-  name: string;
+  first_name: string;
+  phone: string;
   email: string;
-  company: string | null;
-  message: string | null;
+  company: string;
   status: string;
+  invite_sent: boolean;
+  invite_sent_at: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;
