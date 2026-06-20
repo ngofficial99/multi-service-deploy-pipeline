@@ -5,8 +5,8 @@ A deploy pipeline for the Hanomi stack — three services, each on its own VM
 
 | Service | Stack | OS | Runs as |
 |---|---|---|---|
-| **backend** | Go + Gin | Linux | Podman + Quadlet (systemd) container |
-| **frontend** | Next.js | Linux | Podman + Quadlet (systemd) container |
+| **backend** | Go + Gin | Linux | Podman container under a systemd unit |
+| **frontend** | Next.js | Linux | Podman container under a systemd unit |
 | **worker** | Python | Windows | native Windows Service |
 
 They form one coherent product slice: the **frontend** is the Hanomi landing
@@ -71,8 +71,8 @@ Hanomi welcome message, recording that the invite was sent.
 | CI → GCP auth | **Workload Identity Federation** | Short-lived OIDC tokens — **no service-account JSON keys** stored in GitHub. |
 | Desired state | **GitOps repo** (`deploy-state`) | A deploy is a commit; rollback is `git revert`; full audit trail. VMs need only *read* access. |
 | Change signal | **Git poll (~60s)** | The GitOps invariant; also self-healing (corrects drift even with no push). Tradeoff: up-to-60s deploy latency. Considered Pub/Sub push — rejected as over-engineering for a 3-VM fleet. |
-| Linux runtime | **Podman + Quadlet (systemd)** | A real desired-state reconciler: `Restart=always` self-heal + healthcheck-triggered restart. **Rejected the GCP-native `gce-container-declaration`/konlet path because it is deprecated** (deprecated 2025-07-21; VM-create stops 2026-07-31; full support ends 2027-07-31). Google now directs users to startup-script / cloud-init, which is exactly what we use to install Podman. |
-| Windows runtime | **native Windows Service** (`sc.exe`) | systemd/Quadlet are Linux-only and Windows containers are heavy. The worker runs as a process; SCM failure-recovery gives the same self-heal. A deliberate, honest second track. |
+| Linux runtime | **Podman container under a generated systemd unit** | The reconciler generates a systemd unit running `podman run`, giving `Restart=always` self-heal. **Rejected the GCP-native `gce-container-declaration`/konlet path because it is deprecated** (deprecated 2025-07-21; VM-create stops 2026-07-31). Considered Quadlet but Debian 12 ships Podman 4.3.1 (Quadlet needs ≥4.4), so a generated unit is the portable choice. Google now directs users to startup-script / cloud-init, which is exactly what we use to install Podman. |
+| Windows runtime | **scheduled task running the Python worker** | systemd/Podman-Quadlet are Linux-only and Windows containers are heavy. A bare `python.exe` can't be an `sc.exe` service (no SCM protocol → error 1053), so the worker runs as a SYSTEM **scheduled task** with auto-restart; health = a fresh DB heartbeat. A deliberate, honest second track. |
 | Versioning | **immutable digest-pinned images** | Deterministic rollback, no rebuild. (Note: this is why we do **not** use `podman auto-update` to deploy — it tracks a moving tag and conflicts with digest pinning; CI drives the version change instead.) |
 | Actual/health state | VM writes `actual.json` to **GCS** | Clean split: Git = desired, GCS = actual. Avoids VMs needing Git *write* access. |
 | Database | **Cloud SQL Postgres, private IP only** | No public endpoint; reached over Private Services Access. IAM DB auth enabled; password fallback in Secret Manager. |
