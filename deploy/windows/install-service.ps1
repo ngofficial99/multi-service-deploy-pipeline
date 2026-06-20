@@ -16,8 +16,19 @@ $artifactBucket = [Environment]::GetEnvironmentVariable("ARTIFACT_BUCKET", "Mach
 $digest = ($Image -split "@")[-1]
 $key    = $digest -replace "[:/]", "_"
 
+# Sync the pinned worker source. Use `cp -r .../<key>` (NOT rsync, which on
+# Windows mangled names with the '**' glob and ':' chars). Clean the dir first.
+Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $src | Out-Null
-& gcloud storage rsync -r "gs://$artifactBucket/worker/$key" $src
+& gcloud storage cp -r "gs://$artifactBucket/worker/$key" "$base\worker-src-dl" 2>$null
+# cp -r creates a nested <key> dir; flatten it into $src.
+$inner = Join-Path "$base\worker-src-dl" $key
+if (Test-Path $inner) {
+  Copy-Item -Recurse -Force "$inner\*" $src
+} else {
+  Copy-Item -Recurse -Force "$base\worker-src-dl\*" $src
+}
+Remove-Item -Recurse -Force "$base\worker-src-dl" -ErrorAction SilentlyContinue
 
 # Install dependencies for the pinned source.
 if (Test-Path "$src\requirements.txt") {

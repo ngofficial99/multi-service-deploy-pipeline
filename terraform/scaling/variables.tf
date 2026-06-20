@@ -42,11 +42,18 @@ variable "scaling" {
     max_replicas : number
     machine_type : string
   }))
+  # DEMO defaults below (max 1-2, cheap). For production you change ONLY these
+  # numbers — nothing structural. e.g. to serve 100k users:
+  #   backend  = { min_replicas = 20, max_replicas = 100, machine_type = "n2-standard-4" }
+  #   frontend = { min_replicas = 20, max_replicas = 100, machine_type = "n2-standard-2" }
+  #   worker   = { min_replicas = 5,  max_replicas = 100, machine_type = "n2-standard-2" }
+  # The autoscaler, LB capacity, and MIG honor these directly; max is a hard cap,
+  # min keeps that many warm. (Quota permitting — see README scaling notes.)
   default = {
-    backend  = { min_replicas = 1, max_replicas = 2, machine_type = "e2-small" }
-    frontend = { min_replicas = 1, max_replicas = 2, machine_type = "e2-small" }
+    backend  = { min_replicas = 1, max_replicas = 1, machine_type = "e2-small" }
+    frontend = { min_replicas = 1, max_replicas = 1, machine_type = "e2-small" }
     # worker can scale to zero when the queue is empty.
-    worker = { min_replicas = 0, max_replicas = 2, machine_type = "e2-small" }
+    worker = { min_replicas = 0, max_replicas = 1, machine_type = "e2-small" }
   }
 }
 
