@@ -12,6 +12,18 @@ $base = "C:\hanomi"
 $src  = "$base\worker-src"
 $artifactBucket = [Environment]::GetEnvironmentVariable("ARTIFACT_BUCKET", "Machine")
 
+# Resolve tools to ABSOLUTE paths. The scheduled task runs as SYSTEM and may
+# have captured a stale PATH that lacks Python/gcloud, so `& python`/`& gcloud`
+# throw "file not found". Resolve explicitly with sensible fallbacks.
+function Resolve-Exe($name, $fallback) {
+  $c = Get-Command $name -ErrorAction SilentlyContinue
+  if ($c) { return $c.Source }
+  if (Test-Path $fallback) { return $fallback }
+  return $name # last resort
+}
+$python = Resolve-Exe "python" "C:\Python312\python.exe"
+$gcloud = Resolve-Exe "gcloud" "C:\gcloud\google-cloud-sdk\bin\gcloud.cmd"
+
 # Derive a filesystem-safe key from the digest (everything after '@' or ':').
 $digest = ($Image -split "@")[-1]
 $key    = $digest -replace "[:/]", "_"
@@ -21,17 +33,17 @@ $key    = $digest -replace "[:/]", "_"
 # directly in $src (NOT a nested <key> dir, and NOT rsync, which mangled names).
 Remove-Item -Recurse -Force $src -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $src | Out-Null
-& gcloud storage cp -r "gs://$artifactBucket/worker/$key/*" $src
+& $gcloud storage cp -r "gs://$artifactBucket/worker/$key/*" $src
 if (-not (Test-Path "$src\worker.py")) {
   throw "worker source sync failed: $src\worker.py missing after cp"
 }
 
 # Install dependencies for the pinned source.
 if (Test-Path "$src\requirements.txt") {
-  & python -m pip install --quiet -r "$src\requirements.txt"
+  & $python -m pip install --quiet -r "$src\requirements.txt"
 }
 
-$py = (Get-Command python).Source
+$py = $python
 
 # A wrapper script loads the env file (DATABASE_URL etc.) into the process
 # environment, then runs the worker. Keeps the task definition simple.
