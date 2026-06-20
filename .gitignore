@@ -20,3 +20,6 @@ __pycache__/
 !*.env.example
 # OS
 .DS_Store
+
+# local-only, not for the public repo
+SUBMISSION.md
