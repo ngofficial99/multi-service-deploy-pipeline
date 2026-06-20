@@ -31,7 +31,7 @@ export default async function Page() {
 
           <div className="eyebrow">
             <span className="dot" />
-            <span className="mono">Intelligence layer for mechanical engineering · live on GCP</span>
+            <span className="mono">Intelligence layer for mechanical engineering · live on GCP · v2</span>
           </div>
 
           <h1 className="hero-title">
