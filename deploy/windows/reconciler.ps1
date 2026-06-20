@@ -48,15 +48,21 @@ function Test-WorkerHealthy {
 
 function Deploy-Worker($image) {
   Write-Log "deploying $image"
-  # Fetch secrets fresh into the machine env file (read by the worker wrapper).
-  & gcloud secrets versions access latest --secret="hanomi-worker-env" |
-    Out-File -Encoding ascii "$base\worker.env"
+  # Fetch secrets fresh into the machine env file. Use [IO.File]::WriteAllText
+  # (NOT `| Out-File`, which produced an EMPTY file via the PowerShell pipe on
+  # Windows). Write UTF-8 no-BOM so Python reads it cleanly.
+  $secret = (& gcloud secrets versions access latest --secret="hanomi-worker-env" 2>$null) -join "`n"
+  [IO.File]::WriteAllText("$base\worker.env", $secret, (New-Object Text.UTF8Encoding($false)))
   # install-service.ps1 installs the scheduled task AND starts it.
   & "$stateRepo\deploy\windows\install-service.ps1" -Image $image
 }
 
-# 1) sync desired state
-try { & git -C $stateRepo pull --quiet --ff-only } catch { Write-Log "git pull failed (cached state)" }
+# 1) sync desired state. Use fetch + reset (NOT `pull --ff-only`, which failed
+# with "Cannot fast-forward to multiple branches" on the bootstrap clone).
+try {
+  & git -C $stateRepo fetch --quiet origin main
+  & git -C $stateRepo reset --quiet --hard origin/main
+} catch { Write-Log "git sync failed (using cached state)" }
 $desiredLine = Select-String -Path "$stateRepo\state\worker\desired.yaml" -Pattern '^image:\s*(.+)$'
 $desired = $desiredLine.Matches.Groups[1].Value.Trim()
 $current = if (Test-Path $lastGood) { (Get-Content $lastGood).Trim() } else { "" }
