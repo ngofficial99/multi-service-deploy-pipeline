@@ -86,7 +86,29 @@ if ($current -ne "") {
   }
 }
 
-# 6) degraded
+# 6) degraded — dump diagnostics to GCS so we can debug Windows without RDP/SSH.
+try {
+  $diag = @()
+  $diag += "=== task info ==="
+  $diag += (schtasks /Query /TN HanomiWorker /V /FO LIST 2>&1 | Out-String)
+  $diag += "=== worker.env present? ==="
+  $diag += (Test-Path "$base\worker.env").ToString()
+  $diag += "=== worker-src listing ==="
+  $diag += (Get-ChildItem "$base\worker-src" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name | Out-String)
+  $diag += "=== python version ==="
+  $diag += (& python --version 2>&1 | Out-String)
+  $diag += "=== heartbeat_age ==="
+  $diag += (& python "$stateRepo\deploy\windows\heartbeat_age.py" 2>&1 | Out-String)
+  $diag += "=== run wrapper manually (10s) ==="
+  $job = Start-Job -ScriptBlock { & powershell -NoProfile -ExecutionPolicy Bypass -File "C:\hanomi\run-worker.ps1" 2>&1 }
+  Start-Sleep -Seconds 10
+  $diag += ($job | Receive-Job 2>&1 | Out-String)
+  $job | Stop-Job; $job | Remove-Job
+  $dfile = Join-Path $env:TEMP "worker-diag.txt"
+  Set-Content -Path $dfile -Value ($diag -join "`n") -Encoding ascii
+  & gcloud storage cp $dfile "gs://$bucket/state/worker/diag.txt" --quiet
+} catch { Write-Log "diag dump failed: $_" }
+
 Report $false $desired "degraded_rollback_failed"
 Write-Log "DEGRADED: rollback failed"
 exit 1
