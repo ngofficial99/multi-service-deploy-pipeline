@@ -22,6 +22,7 @@ $desired   = ""  # initialized so the top-level catch can always report
 function Write-Log($msg) { Write-Host "[reconciler/worker] $msg" }
 
 function Report($healthy, $sha, $err) {
+  if ($err) { $err = ($err -replace '\s+', ' ').Trim() }  # single line for clean JSON
   $obj = [ordered]@{
     service = "worker"; sha = $sha
     healthy = $healthy; error = $err
