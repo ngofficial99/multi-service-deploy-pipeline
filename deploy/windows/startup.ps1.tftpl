@@ -1,18 +1,24 @@
-# Windows VM startup script (rendered by Terraform). Clones the deploy-state
-# repo if needed, then runs the idempotent bootstrap.
+# Windows VM startup script (rendered by Terraform).
+#
+# Bootstrap chicken-and-egg: the bootstrap script lives in the deploy-state
+# repo, but we need git to clone that repo. Solve it by downloading ONLY the
+# bootstrap script directly over HTTPS (the repo is public), then run it — the
+# bootstrap installs git/python/gcloud and does the full clone itself. No winget.
 $ErrorActionPreference = "Stop"
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $base = "C:\hanomi"
 New-Item -ItemType Directory -Force -Path $base | Out-Null
 
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-  winget install -e --id Git.Git --silent `
-    --accept-package-agreements --accept-source-agreements
-}
-if (-not (Test-Path "$base\deploy-state\.git")) {
-  git clone "${state_repo_url}" "$base\deploy-state"
-}
+# Derive the raw URL for bootstrap.ps1 from the repo URL.
+# e.g. https://github.com/ngofficial99/hanomi-deploy-state.git
+#   -> https://raw.githubusercontent.com/ngofficial99/hanomi-deploy-state/main/deploy/windows/bootstrap.ps1
+$repo = "${state_repo_url}" -replace '\.git$',''
+$rawBase = $repo -replace 'https://github.com/','https://raw.githubusercontent.com/'
+$bootstrapUrl = "$rawBase/main/deploy/windows/bootstrap.ps1"
 
-& "$base\deploy-state\deploy\windows\bootstrap.ps1" `
+Invoke-WebRequest -Uri $bootstrapUrl -OutFile "$base\bootstrap.ps1"
+
+& "$base\bootstrap.ps1" `
   -StateRepoUrl "${state_repo_url}" `
   -StateBucket "${state_bucket}" `
   -ArtifactBucket "${artifact_bucket}"

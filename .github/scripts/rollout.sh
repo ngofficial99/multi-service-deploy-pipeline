@@ -55,13 +55,16 @@ set_desired() { # service image@digest
   git -C "$STATE_DIR" push -q
 }
 
-gate() { # service
-  local svc="$1" deadline=$(( SECONDS + 300 )) body=""
-  echo "⏳ gating ${svc} (waiting for healthy actual.json)…"
+gate() { # service image@digest
+  local svc="$1" img="$2" deadline=$(( SECONDS + 300 )) body=""
+  # Require the VM to report healthy FOR THIS digest — not just "healthy"
+  # (which could be a stale healthy from the previous version).
+  local want="${img##*@}"   # sha256:...
+  echo "⏳ gating ${svc} (waiting for healthy actual.json @ ${want})…"
   while (( SECONDS < deadline )); do
     body="$(gcloud storage cat "gs://${STATE_BUCKET}/state/${svc}/actual.json" 2>/dev/null || true)"
-    if echo "$body" | grep -q '"healthy":true'; then
-      echo "✅ ${svc} healthy: ${body}"
+    if echo "$body" | grep -q '"healthy":true' && echo "$body" | grep -q "$want"; then
+      echo "✅ ${svc} healthy on ${want}: ${body}"
       return 0
     fi
     if echo "$body" | grep -q 'degraded_rollback_failed'; then
@@ -70,7 +73,7 @@ gate() { # service
     fi
     sleep 10
   done
-  echo "❌ ${svc} did not become healthy within timeout. Last state: ${body:-<none>}" >&2
+  echo "❌ ${svc} did not become healthy on ${want} within timeout. Last state: ${body:-<none>}" >&2
   return 1
 }
 
@@ -87,12 +90,14 @@ rollout() { # service flag
     publish_worker_source "$img"
   fi
   set_desired "$svc" "$img"
-  gate "$svc"   # non-zero return aborts (set -e); later services untouched
+  gate "$svc" "$img"   # non-zero return aborts (set -e); later services untouched
 }
 
-# Sequential, fail-fast. backend -> worker -> frontend.
+# Sequential, fail-fast. backend first (API contract), then frontend (so the UI
+# only ships once its backend is healthy), then the worker (decoupled via the DB
+# queue, so it can land last without stranding anything).
 rollout backend  "${DEPLOY_BACKEND:-false}"
-rollout worker   "${DEPLOY_WORKER:-false}"
 rollout frontend "${DEPLOY_FRONTEND:-false}"
+rollout worker   "${DEPLOY_WORKER:-false}"
 
 echo "🎉 rollout complete"
