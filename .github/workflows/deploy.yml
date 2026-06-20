@@ -41,6 +41,10 @@ jobs:
   deploy:
     needs: changes
     runs-on: ubuntu-latest
+    # Skip cleanly until the GCP infra exists and the repo Variables are set
+    # (WIF_PROVIDER/CI_SA come from `terraform apply` outputs). Without this the
+    # auth step errors on every push before the infrastructure is provisioned.
+    if: ${{ vars.WIF_PROVIDER != '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,7 +57,7 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.CI_SA }}
 
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@v3
 
       - name: Configure docker auth
         run: gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
