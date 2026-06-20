@@ -5,8 +5,8 @@
 #
 #   1. git-pull the deploy-state repo (desired state)
 #   2. read the pinned image digest for this service
-#   3. if it differs from what's running: fetch secrets, render+install the
-#      Quadlet unit, pull the image, swap, restart
+#   3. if it differs from what's running: fetch secrets, pull the image,
+#      (re)generate the systemd unit running `podman run`, swap, restart
 #   4. health-check the new version
 #   5. on failure: roll back to the last-good digest and re-health-check
 #   6. report actual state ({sha,healthy,error}) to GCS for the CI gate
@@ -19,15 +19,15 @@ SERVICE="${SERVICE:?set SERVICE=backend|frontend}"
 STATE_BUCKET="${STATE_BUCKET:?set STATE_BUCKET}"
 
 STATE_REPO_DIR="/opt/hanomi/deploy-state"
-QUADLET_DIR="/etc/containers/systemd"
 ENVFILE="/etc/hanomi/${SERVICE}.env"
 LASTGOOD="/var/lib/hanomi/${SERVICE}.lastgood"
-TMPL="/opt/hanomi/deploy-state/deploy/linux/${SERVICE}.container.tmpl"
+UNIT="/etc/systemd/system/${SERVICE}.service"
+CTR="hanomi-${SERVICE}"
 GCS_STATE="gs://${STATE_BUCKET}/state/${SERVICE}/actual.json"
 
 case "$SERVICE" in
-  backend)  HEALTH_URL="http://localhost:8080/healthz" ;;
-  frontend) HEALTH_URL="http://localhost:3000/api/health" ;;
+  backend)  PORT=8080; HEALTH_URL="http://localhost:8080/healthz" ;;
+  frontend) PORT=3000; HEALTH_URL="http://localhost:3000/api/health" ;;
   *) echo "unknown service: $SERVICE" >&2; exit 2 ;;
 esac
 
@@ -69,10 +69,33 @@ deploy_image() { # image
   # problem fails here, not mid-swap.
   registry_login "$img"
   podman pull "$img"
-  # Render and install the Quadlet unit, then let systemd generate the service.
-  sed -e "s#__IMAGE__#${img}#g" -e "s#__ENVFILE__#${ENVFILE}#g" \
-    "$TMPL" >"${QUADLET_DIR}/${SERVICE}.container"
+
+  # Generate a plain systemd unit that runs the container via `podman run`.
+  # We deliberately do NOT use Quadlet: Debian 12 ships Podman 4.3.1, which has
+  # no Quadlet generator (needs >= 4.4). A generated unit works on any Podman
+  # version and still gives systemd-level self-heal via Restart=always.
+  cat >"$UNIT" <<EOF
+[Unit]
+Description=Hanomi ${SERVICE}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Restart=always
+RestartSec=3
+TimeoutStartSec=120
+ExecStartPre=-/usr/bin/podman rm -f ${CTR}
+ExecStart=/usr/bin/podman run --rm --name ${CTR} \\
+  --env-file ${ENVFILE} \\
+  -p ${PORT}:${PORT} \\
+  ${img}
+ExecStop=/usr/bin/podman stop ${CTR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
   systemctl daemon-reload
+  systemctl enable "${SERVICE}.service" >/dev/null 2>&1 || true
   systemctl restart "${SERVICE}.service"
 }
 
