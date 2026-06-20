@@ -71,7 +71,12 @@ $action = New-ScheduledTaskAction -Execute "powershell.exe" `
   -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$reconciler`""
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
   -RepetitionInterval (New-TimeSpan -Seconds 60)
+# Robust scheduling: don't pile up overlapping runs (a slow reconcile must not
+# block the next), and kill any run that hangs past 5 min. Without this, a stuck
+# instance blocks all future cycles (the bug we hit: reconciler stopped cycling).
+$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
+  -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName "HanomiReconcile" -Action $action -Trigger $trigger `
-  -RunLevel Highest -User "SYSTEM" -Force | Out-Null
+  -Settings $settings -RunLevel Highest -User "SYSTEM" -Force | Out-Null
 
 Write-Host "bootstrap complete"
