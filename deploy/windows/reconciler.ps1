@@ -17,6 +17,7 @@ $svcName   = "HanomiWorker"
 $lastGood  = "$base\worker.lastgood"
 $bucket    = [Environment]::GetEnvironmentVariable("STATE_BUCKET", "Machine")
 $gcsState  = "gs://$bucket/state/worker/actual.json"
+$desired   = ""  # initialized so the top-level catch can always report
 
 function Write-Log($msg) { Write-Host "[reconciler/worker] $msg" }
 
@@ -56,6 +57,11 @@ function Deploy-Worker($image) {
   # install-service.ps1 installs the scheduled task AND starts it.
   & "$stateRepo\deploy\windows\install-service.ps1" -Image $image
 }
+
+# Top-level guard: with ErrorActionPreference=Stop, ANY unhandled error would
+# exit before we report — leaving actual.json stale forever. Always report the
+# exception to GCS so the CI gate (and we) can see what failed.
+try {
 
 # 1) sync desired state. Use fetch + reset (NOT `pull --ff-only`, which failed
 # with "Cannot fast-forward to multiple branches" on the bootstrap clone).
@@ -118,3 +124,12 @@ try {
 Report $false $desired "degraded_rollback_failed"
 Write-Log "DEGRADED: rollback failed"
 exit 1
+
+} catch {
+  # Any unhandled error in the reconcile flow lands here — report it so state is
+  # never silently stale, and surface the message to the CI gate.
+  $msg = ("reconcile_error: " + $_.Exception.Message) -replace '"', "'"
+  try { Report $false "${desired}" $msg } catch { Write-Log "final report failed: $_" }
+  Write-Log "RECONCILE ERROR: $($_.Exception.Message)"
+  exit 1
+}
