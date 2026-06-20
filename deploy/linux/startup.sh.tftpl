@@ -17,6 +17,9 @@ else
   git -C /opt/hanomi/deploy-state pull --ff-only || true
 fi
 
+# Ensure the reconciler is executable regardless of the git mode bit.
+chmod +x /opt/hanomi/deploy-state/deploy/linux/reconciler.sh
+
 # Per-VM reconcile config.
 cat >/etc/hanomi/reconcile.env <<EOF
 SERVICE=${service}

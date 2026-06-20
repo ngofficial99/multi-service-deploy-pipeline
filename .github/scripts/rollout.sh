@@ -15,18 +15,18 @@
 set -euo pipefail
 
 : "${REGISTRY:?}" "${STATE_BUCKET:?}" "${ARTIFACT_BUCKET:?}" "${GIT_SHA:?}"
-: "${STATE_REPO:?}" "${STATE_REPO_TOKEN:?}"
+: "${STATE_REPO:?}"
+
+# Deploy-state repo is accessed over SSH using a write-enabled DEPLOY KEY scoped
+# to ONLY that repo (more tightly scoped than a PAT, and unambiguous vs the
+# main-repo credential actions/checkout installs). The private key is provided
+# via the STATE_REPO_DEPLOY_KEY secret; the workflow writes it to STATE_SSH_KEY.
+: "${STATE_SSH_KEY:?}"
+export GIT_SSH_COMMAND="ssh -i ${STATE_SSH_KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+STATE_REMOTE="git@github.com:${STATE_REPO}.git"
 
 STATE_DIR="$(mktemp -d)"
-# Auth header for the deploy-state repo. actions/checkout configures a global
-# credential header that injects the MAIN repo's GITHUB_TOKEN for all github.com
-# requests — which 403s on push to the (different) deploy-state repo. We pass our
-# own Authorization header inline on every git op below (via STATE_GIT), and a
-# blank global extraheader to neutralise the inherited one.
-AUTH_B64="$(printf 'x-access-token:%s' "${STATE_REPO_TOKEN}" | base64 | tr -d '\n')"
-STATE_GIT=(git -c "http.https://github.com/.extraheader=Authorization: Basic ${AUTH_B64}")
-
-"${STATE_GIT[@]}" clone "https://github.com/${STATE_REPO}.git" "$STATE_DIR"
+git clone "$STATE_REMOTE" "$STATE_DIR"
 git -C "$STATE_DIR" config user.email "ci@hanomi.ai"
 git -C "$STATE_DIR" config user.name "hanomi-ci"
 
@@ -52,7 +52,7 @@ set_desired() { # service image@digest
   printf 'service: %s\nimage: %s\n' "$svc" "$img" >"${STATE_DIR}/state/${svc}/desired.yaml"
   git -C "$STATE_DIR" add -A
   git -C "$STATE_DIR" commit -q -m "deploy(${svc}): ${img}"
-  "${STATE_GIT[@]}" -C "$STATE_DIR" push -q
+  git -C "$STATE_DIR" push -q
 }
 
 gate() { # service
