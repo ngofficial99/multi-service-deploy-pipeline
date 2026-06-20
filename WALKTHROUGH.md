@@ -148,21 +148,28 @@ Everything is on GitHub (public).
 
 **Actually deployed live** on the real GCP project `knock-knock-dev-499112`:
 - ✅ All foundational infra (VPC, Cloud SQL, buckets, secrets, service accounts,
-  Workload Identity Federation) — **42 resources, applied and verified.**
-- ✅ The 3 VMs — created, running, no public IPs.
+  Workload Identity Federation) — **42 resources, applied.**
+- ✅ The 3 VMs — running, no public IPs.
 - ✅ The CI pipeline runs end-to-end: builds images, authenticates to GCP with
-  zero stored keys, commits real image digests to the deploy-state repo.
-- ✅ The backend VM's reconciler pulls desired state, logs into the registry,
-  and successfully pulls the image.
-- ⏳ **In progress:** the backend container is pulled but not yet reporting
-  "healthy" — almost certainly because it can't reach the database yet (a config
-  thing to finish). This is the next step to debug Monday-morning-fresh.
+  **zero stored keys** (Workload Identity Federation), commits digest-pinned
+  images to the deploy-state repo (via an SSH deploy key).
+- ✅ **Backend is LIVE and healthy** — container running, `/healthz` green,
+  connected to Cloud SQL.
+- ✅ **Frontend is LIVE and healthy**, fronted by an external HTTP Load Balancer
+  with a **public URL** — submitting the "Try Hanomi" form through that public
+  URL persists a lead row in Cloud SQL (verified end-to-end).
+- ⏳ **Windows worker:** its reconciler runs and reports state correctly, but the
+  Python worker on Windows was the last mile to get green (Windows-service
+  packaging). See `AI_USAGE.md` / the README for the exact state at submission.
 
-**This was a genuine live deploy**, and along the way we hit and fixed four real
-bugs that only show up against real infrastructure (cross-repo Git auth, a
-missing executable bit, registry authentication for Podman, and gcloud not being
-preinstalled on the VM image). Those fixes are all committed. This kind of
-"debugged it against real cloud" story is good to mention in the interview.
+**This was a genuine live deploy**, and along the way we hit and fixed a series
+of real bugs that only show up against real infrastructure — cross-repo Git auth
+(switched to an SSH deploy key), a missing executable bit, Podman→Artifact
+Registry authentication, gcloud not being preinstalled, Podman 4.3.1 lacking
+Quadlet (so the reconciler generates a plain systemd `podman run` unit), the
+rollout gate needing to match the *deployed digest*, and a hardcoded backend IP
+that broke on VM recreation (fixed by using GCE's stable internal DNS name).
+"Debugged it against real cloud" is the strongest part of the story.
 
 **Cost note:** Cloud SQL + 3 VMs (incl. one Windows VM) are running and billing.
 When you're done, run `cd terraform && terraform destroy` to stop the cost. Tell
