@@ -34,13 +34,21 @@ function Report($healthy, $sha, $err) {
   & gcloud storage cp $tmp $gcsState --quiet
 }
 
+function Get-Python {
+  $c = Get-Command python -ErrorAction SilentlyContinue
+  if ($c) { return $c.Source }
+  if (Test-Path "C:\Python312\python.exe") { return "C:\Python312\python.exe" }
+  return "python"
+}
+
 function Test-WorkerHealthy {
   # Health = the worker wrote a heartbeat row in the last 60s. The worker runs as
   # a scheduled task; a fresh heartbeat is proof it's actually processing, which
   # is a stronger signal than "the task object exists". Allow time for first run.
+  $py = Get-Python
   for ($i = 0; $i -lt 30; $i++) {
     try {
-      $age = & python "$stateRepo\deploy\windows\heartbeat_age.py"
+      $age = & $py "$stateRepo\deploy\windows\heartbeat_age.py"
       if ([int]$age -lt 60) { return $true }
     } catch { }
     Start-Sleep -Seconds 3
