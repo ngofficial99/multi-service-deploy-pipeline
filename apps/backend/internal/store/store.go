@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"os"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -31,30 +33,68 @@ type Lead struct {
 }
 
 type Store struct {
-	pool *pgxpool.Pool
-	dsn  string
+	pool      *pgxpool.Pool   // primary: all writes + migrations
+	readPools []*pgxpool.Pool // optional read replicas (reads round-robin)
+	rr        atomic.Uint32   // round-robin cursor
+	dsn       string
 }
 
-func New(ctx context.Context, dsn string) (*Store, error) {
+// newPool builds a connection pool with a bounded size so that scaling the
+// backend horizontally cannot exhaust Cloud SQL connections. With N instances
+// the DB sees at most N * DB_MAX_CONNS connections — the cap that makes
+// "min=20, max=100" safe. (Pair with PgBouncer at very high N — see README.)
+func newPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, err
 	}
-	// Bound the per-instance pool so that scaling the backend horizontally does
-	// NOT exhaust Cloud SQL's max_connections. With N instances the DB sees at
-	// most N * DB_MAX_CONNS connections, so this cap is what makes "min=20,
-	// max=100" safe. Tune DB_MAX_CONNS against the DB tier's connection limit
-	// (and/or front the DB with PgBouncer — see README scaling notes).
 	cfg.MaxConns = int32(envInt("DB_MAX_CONNS", 10))
 	cfg.MinConns = int32(envInt("DB_MIN_CONNS", 0))
 	cfg.MaxConnIdleTime = 5 * time.Minute
 	cfg.MaxConnLifetime = 30 * time.Minute
+	return pgxpool.NewWithConfig(ctx, cfg)
+}
 
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+func New(ctx context.Context, dsn string) (*Store, error) {
+	primary, err := newPool(ctx, dsn)
 	if err != nil {
 		return nil, err
 	}
-	return &Store{pool: pool, dsn: dsn}, nil
+	s := &Store{pool: primary, dsn: dsn}
+
+	// Optional read replicas: comma-separated DSNs in READ_DATABASE_URLS.
+	// Reads (List/Get) round-robin across them; writes always hit the primary.
+	// This is what lets the data tier serve read-heavy 100k traffic by adding
+	// replicas. Empty => all reads go to the primary (single-DB demo default).
+	for _, rdsn := range splitNonEmpty(os.Getenv("READ_DATABASE_URLS"), ",") {
+		rp, err := newPool(ctx, strings.TrimSpace(rdsn))
+		if err != nil {
+			return nil, err
+		}
+		s.readPools = append(s.readPools, rp)
+	}
+	return s, nil
+}
+
+// reader returns the pool to use for read queries: a replica (round-robin) if
+// any are configured, otherwise the primary.
+func (s *Store) reader() *pgxpool.Pool {
+	n := len(s.readPools)
+	if n == 0 {
+		return s.pool
+	}
+	i := int(s.rr.Add(1)-1) % n
+	return s.readPools[i]
+}
+
+func splitNonEmpty(s, sep string) []string {
+	out := []string{}
+	for _, p := range strings.Split(s, sep) {
+		if strings.TrimSpace(p) != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func envInt(k string, def int) int {
@@ -66,7 +106,12 @@ func envInt(k string, def int) int {
 	return def
 }
 
-func (s *Store) Close() { s.pool.Close() }
+func (s *Store) Close() {
+	s.pool.Close()
+	for _, rp := range s.readPools {
+		rp.Close()
+	}
+}
 
 // Migrate runs embedded migrations. Called on deploy BEFORE serving traffic;
 // fail-closed so a bad migration aborts the deploy.
@@ -105,7 +150,7 @@ func (s *Store) CreateLead(ctx context.Context, firstName, phone, email, company
 }
 
 func (s *Store) ListLeads(ctx context.Context) ([]Lead, error) {
-	rows, err := s.pool.Query(ctx,
+	rows, err := s.reader().Query(ctx,
 		`SELECT id, first_name, phone, email, company, status, invite_sent, invite_sent_at, error, created_at, updated_at
 		 FROM leads ORDER BY id DESC LIMIT 100`)
 	if err != nil {
@@ -125,7 +170,7 @@ func (s *Store) ListLeads(ctx context.Context) ([]Lead, error) {
 
 func (s *Store) GetLead(ctx context.Context, id int64) (Lead, error) {
 	var l Lead
-	err := s.pool.QueryRow(ctx,
+	err := s.reader().QueryRow(ctx,
 		`SELECT id, first_name, phone, email, company, status, invite_sent, invite_sent_at, error, created_at, updated_at
 		 FROM leads WHERE id=$1`, id).
 		Scan(&l.ID, &l.FirstName, &l.Phone, &l.Email, &l.Company, &l.Status, &l.InviteSent, &l.InviteSentAt, &l.Error, &l.CreatedAt, &l.UpdatedAt)
