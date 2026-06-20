@@ -33,26 +33,26 @@ function Report($healthy, $sha, $err) {
 }
 
 function Test-WorkerHealthy {
-  # Healthy iff the service is Running AND it wrote a heartbeat in the last 60s.
-  $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-  if ($null -eq $svc -or $svc.Status -ne "Running") { return $false }
-  for ($i = 0; $i -lt 15; $i++) {
+  # Health = the worker wrote a heartbeat row in the last 60s. The worker runs as
+  # a scheduled task; a fresh heartbeat is proof it's actually processing, which
+  # is a stronger signal than "the task object exists". Allow time for first run.
+  for ($i = 0; $i -lt 30; $i++) {
     try {
       $age = & python "$stateRepo\deploy\windows\heartbeat_age.py"
       if ([int]$age -lt 60) { return $true }
     } catch { }
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
   }
   return $false
 }
 
 function Deploy-Worker($image) {
   Write-Log "deploying $image"
-  # Fetch secrets fresh into the machine env file (used by the service + helper).
+  # Fetch secrets fresh into the machine env file (read by the worker wrapper).
   & gcloud secrets versions access latest --secret="hanomi-worker-env" |
     Out-File -Encoding ascii "$base\worker.env"
+  # install-service.ps1 installs the scheduled task AND starts it.
   & "$stateRepo\deploy\windows\install-service.ps1" -Image $image
-  Restart-Service -Name $svcName -ErrorAction SilentlyContinue
 }
 
 # 1) sync desired state
