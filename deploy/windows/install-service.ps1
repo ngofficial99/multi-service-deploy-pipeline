@@ -47,8 +47,9 @@ Get-Content C:\hanomi\worker.env | ForEach-Object {
 
 # Register/refresh the worker scheduled task: run at startup as SYSTEM, restart
 # if it ever stops. Stop any existing instance first so we pick up new source.
-schtasks /End /TN HanomiWorker 2>$null | Out-Null
-Unregister-ScheduledTask -TaskName HanomiWorker -Confirm:$false -ErrorAction SilentlyContinue
+# Wrapped so a not-yet-existing task doesn't throw under ErrorActionPreference=Stop.
+try { schtasks.exe /End /TN HanomiWorker 2>$null | Out-Null } catch {}
+try { Unregister-ScheduledTask -TaskName HanomiWorker -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 
 $action  = New-ScheduledTaskAction -Execute "powershell.exe" `
   -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$wrapper`""
@@ -59,6 +60,6 @@ Register-ScheduledTask -TaskName HanomiWorker -Action $action -Trigger $trigger 
   -Settings $settings -RunLevel Highest -User "SYSTEM" -Force | Out-Null
 
 # Start it now (don't wait for next boot).
-Start-ScheduledTask -TaskName HanomiWorker
+Start-ScheduledTask -TaskName HanomiWorker -ErrorAction SilentlyContinue
 
 Write-Host "worker scheduled task installed for $Image"
