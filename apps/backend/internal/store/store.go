@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/golang-migrate/migrate/v4"
@@ -34,11 +36,34 @@ type Store struct {
 }
 
 func New(ctx context.Context, dsn string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, dsn)
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	// Bound the per-instance pool so that scaling the backend horizontally does
+	// NOT exhaust Cloud SQL's max_connections. With N instances the DB sees at
+	// most N * DB_MAX_CONNS connections, so this cap is what makes "min=20,
+	// max=100" safe. Tune DB_MAX_CONNS against the DB tier's connection limit
+	// (and/or front the DB with PgBouncer — see README scaling notes).
+	cfg.MaxConns = int32(envInt("DB_MAX_CONNS", 10))
+	cfg.MinConns = int32(envInt("DB_MIN_CONNS", 0))
+	cfg.MaxConnIdleTime = 5 * time.Minute
+	cfg.MaxConnLifetime = 30 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 	return &Store{pool: pool, dsn: dsn}, nil
+}
+
+func envInt(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 func (s *Store) Close() { s.pool.Close() }

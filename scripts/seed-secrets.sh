@@ -19,7 +19,9 @@ DB_URL="postgres://hanomi_app:${DB_PASS}@${DB_IP}:5432/hanomi?sslmode=disable"
 # recreation, unlike the ephemeral internal IP (a real bug we hit live).
 BACKEND_DNS="hanomi-backend.${ZONE}.c.${PROJECT}.internal"
 
-printf 'DATABASE_URL=%s\nPORT=8080\n' "$DB_URL" \
+# DB_MAX_CONNS bounds the per-instance pool so horizontal scaling can't exhaust
+# Cloud SQL connections (the DB sees at most N_instances * DB_MAX_CONNS).
+printf 'DATABASE_URL=%s\nPORT=8080\nDB_MAX_CONNS=%s\n' "$DB_URL" "${DB_MAX_CONNS:-10}" \
   | gcloud secrets versions add hanomi-backend-env --data-file=- --project "$PROJECT"
 
 printf 'BACKEND_URL=http://%s:8080\nPORT=3000\n' "$BACKEND_DNS" \
