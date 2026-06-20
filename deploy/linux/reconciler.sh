@@ -42,13 +42,32 @@ EOF
   rm -f "$tmp"
 }
 
+registry_login() { # image
+  # Authenticate podman to Artifact Registry using the VM's own service-account
+  # token from the metadata server (no gcloud dependency). The SA has
+  # artifactregistry.reader. Token is short-lived; we re-login each reconcile.
+  local host="${1%%/*}"   # registry host = first path segment of the image
+  local token
+  token="$(curl -s -H 'Metadata-Flavor: Google' \
+    'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+    | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
+  if [ -n "$token" ]; then
+    echo "$token" | podman login -u oauth2accesstoken --password-stdin "$host" >/dev/null 2>&1 \
+      && log "registry login ok ($host)" || log "registry login FAILED ($host)"
+  else
+    log "could not obtain metadata token for registry login"
+  fi
+}
+
 deploy_image() { # image
   local img="$1"
   log "deploying $img"
   # Fetch secrets fresh into a 0600 env file owned by root (never logged).
   install -m 0600 /dev/null "$ENVFILE"
   gcloud secrets versions access latest --secret="hanomi-${SERVICE}-env" >"$ENVFILE"
-  # Pull explicitly so a registry hiccup fails here, not mid-swap.
+  # Authenticate to Artifact Registry, then pull explicitly so a registry
+  # problem fails here, not mid-swap.
+  registry_login "$img"
   podman pull "$img"
   # Render and install the Quadlet unit, then let systemd generate the service.
   sed -e "s#__IMAGE__#${img}#g" -e "s#__ENVFILE__#${ENVFILE}#g" \

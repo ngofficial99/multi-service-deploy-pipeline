@@ -6,7 +6,19 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y podman git curl
+apt-get install -y podman git curl apt-transport-https ca-certificates gnupg
+
+# Install the Google Cloud CLI (not present on the base Debian image). The
+# reconciler uses `gcloud secrets` (fetch secrets) and `gcloud storage`
+# (write actual.json). Idempotent.
+if ! command -v gcloud >/dev/null 2>&1; then
+  echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+    > /etc/apt/sources.list.d/google-cloud-sdk.list
+  curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+    | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+  apt-get update -y
+  apt-get install -y google-cloud-cli
+fi
 
 install -d -m 0755 /opt/hanomi /etc/hanomi /var/lib/hanomi /etc/containers/systemd
 
