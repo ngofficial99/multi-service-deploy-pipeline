@@ -23,3 +23,6 @@ __pycache__/
 
 # local-only, not for the public repo
 SUBMISSION.md
+
+# internal planning docs, not for the public repo
+docs/superpowers/
