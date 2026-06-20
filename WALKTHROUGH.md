@@ -117,10 +117,11 @@ The role is about migrating AWS → GCP, so the README has a translation table
 Engine, RDS↔Cloud SQL, SSM↔the GitOps reconciler, IAM-role-OIDC↔Workload
 Identity Federation). One sharp detail worth mentioning live: GCP's *native*
 "run a container on a VM" feature (`gce-container-declaration` / konlet) is
-**deprecated with a hard cutoff in 2026** — so this design uses **Podman +
-Quadlet** (a real self-healing container runner under systemd) on the Linux
-boxes, which is the current, correct way. (Found via a research pass — see the
-AI-usage file.)
+**deprecated with a hard cutoff in 2026** — so this design runs containers via
+**Podman under a generated systemd unit** on the Linux boxes (self-healing with
+`Restart=always`), which is the current, correct way. (Considered Quadlet but
+Debian 12 ships Podman 4.3.1, which predates Quadlet — found via a research
+pass; see the AI-usage file.)
 
 ---
 
@@ -158,17 +159,21 @@ Everything is on GitHub (public).
 - ✅ **Frontend is LIVE and healthy**, fronted by an external HTTP Load Balancer
   with a **public URL** — submitting the "Try Hanomi" form through that public
   URL persists a lead row in Cloud SQL (verified end-to-end).
-- ⏳ **Windows worker:** its reconciler runs and reports state correctly, but the
-  Python worker on Windows was the last mile to get green (Windows-service
-  packaging). See `AI_USAGE.md` / the README for the exact state at submission.
+- ✅ **Windows worker:** runs the Python worker as a SYSTEM scheduled task,
+  connects to Cloud SQL, processes pending leads, and writes heartbeats —
+  verified end-to-end (a lead submitted via the public URL went
+  `pending → emailed`, `invite_sent = true`).
 
-**This was a genuine live deploy**, and along the way we hit and fixed a series
-of real bugs that only show up against real infrastructure — cross-repo Git auth
+**This was a genuine live deploy**, and along the way we hit and fixed ~14 real
+bugs that only show up against real infrastructure — cross-repo Git auth
 (switched to an SSH deploy key), a missing executable bit, Podman→Artifact
 Registry authentication, gcloud not being preinstalled, Podman 4.3.1 lacking
 Quadlet (so the reconciler generates a plain systemd `podman run` unit), the
-rollout gate needing to match the *deployed digest*, and a hardcoded backend IP
-that broke on VM recreation (fixed by using GCE's stable internal DNS name).
+rollout gate needing to match the *deployed digest*, a hardcoded backend IP that
+broke on VM recreation (fixed by using GCE's stable internal DNS name), and a
+string of Windows-worker issues (winget unavailable to SYSTEM, an empty env
+file, git sync, gcloud copy paths, `python` not being a valid Windows service,
+and a SYSTEM-task PATH gap — all fixed). The full list is in `DESIGN_AND_BUILD.md`.
 "Debugged it against real cloud" is the strongest part of the story.
 
 **Cost note:** Cloud SQL + 3 VMs (incl. one Windows VM) are running and billing.
@@ -183,8 +188,8 @@ me and I'll do it.
 apps/backend      Go/Gin API + DB migrations
 apps/frontend     Next.js landing page + /try form
 apps/worker       Python lead-emailer
-deploy/linux      Podman/Quadlet reconciler + systemd timer (the Linux agent)
-deploy/windows    PowerShell reconciler + Windows service (the worker agent)
+deploy/linux      Podman + generated-systemd-unit reconciler + 60s timer (Linux agent)
+deploy/windows    PowerShell reconciler + scheduled-task worker (the worker agent)
 deploy/state      example desired-state files (the real ones live in the
                   separate hanomi-deploy-state repo)
 terraform/        base infra (VPC, Cloud SQL, VMs, secrets, WIF)
