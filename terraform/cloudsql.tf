@@ -12,7 +12,7 @@ resource "google_sql_database_instance" "pg" {
   deletion_protection = false
 
   settings {
-    tier              = "db-custom-1-3840"
+    tier              = var.cloudsql_tier
     availability_type = "ZONAL"
 
     ip_configuration {
@@ -27,7 +27,7 @@ resource "google_sql_database_instance" "pg" {
     }
 
     backup_configuration {
-      enabled = true
+      enabled = var.cloudsql_backups
     }
   }
 }
