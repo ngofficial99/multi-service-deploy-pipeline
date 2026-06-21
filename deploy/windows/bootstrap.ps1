@@ -26,10 +26,25 @@ function Add-MachinePath($p) {
   $env:Path = "$env:Path;$p"
 }
 
+# Resilient download: installer downloads over Cloud NAT occasionally drop
+# ("connection forcibly closed"); retry with backoff so a transient blip doesn't
+# abort the whole bootstrap.
+function Download-WithRetry($url, $out) {
+  for ($i = 1; $i -le 5; $i++) {
+    try {
+      Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 120
+      if ((Get-Item $out).Length -gt 0) { return }
+    } catch {
+      Write-Host "download attempt $i failed: $($_.Exception.Message)"
+    }
+    Start-Sleep -Seconds ($i * 5)
+  }
+  throw "failed to download $url after 5 attempts"
+}
+
 # --- Python 3.12 (silent, all users) ---
 if (-not (Test-Path "C:\Python312\python.exe")) {
-  $pyUrl = "https://www.python.org/ftp/python/3.12.4/python-3.12.4-amd64.exe"
-  Invoke-WebRequest -Uri $pyUrl -OutFile "$dl\python.exe"
+  Download-WithRetry "https://www.python.org/ftp/python/3.12.4/python-3.12.4-amd64.exe" "$dl\python.exe"
   Start-Process "$dl\python.exe" -Wait -ArgumentList `
     "/quiet InstallAllUsers=1 PrependPath=1 TargetDir=C:\Python312 Include_launcher=0"
 }
@@ -38,16 +53,14 @@ Add-MachinePath "C:\Python312\Scripts"
 
 # --- Git (silent) ---
 if (-not (Test-Path "C:\Program Files\Git\cmd\git.exe")) {
-  $gitUrl = "https://github.com/git-for-windows/git/releases/download/v2.45.2.windows.1/Git-2.45.2-64-bit.exe"
-  Invoke-WebRequest -Uri $gitUrl -OutFile "$dl\git.exe"
+  Download-WithRetry "https://github.com/git-for-windows/git/releases/download/v2.45.2.windows.1/Git-2.45.2-64-bit.exe" "$dl\git.exe"
   Start-Process "$dl\git.exe" -Wait -ArgumentList "/VERYSILENT /NORESTART /NOCANCEL /SP-"
 }
 Add-MachinePath "C:\Program Files\Git\cmd"
 
 # --- Google Cloud CLI (silent, all users) ---
 if (-not (Get-Command gcloud -ErrorAction SilentlyContinue) -and -not (Test-Path "C:\gcloud\google-cloud-sdk\bin\gcloud.cmd")) {
-  $sdkUrl = "https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe"
-  Invoke-WebRequest -Uri $sdkUrl -OutFile "$dl\gcloud.exe"
+  Download-WithRetry "https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe" "$dl\gcloud.exe"
   Start-Process "$dl\gcloud.exe" -Wait -ArgumentList `
     "/S /allusers /noreporting /nostartmenu /nodesktop /InstallDir=C:\gcloud"
 }
