@@ -26,6 +26,11 @@ def run_once(database, mail_sender, worker_id: str) -> bool:
 
 
 def main() -> None:
+    # --- ROLLBACK DRILL (temporary) — proves deploy-worker auto-rollback. ---
+    # This image builds fine but crashes on startup, so the deploy health gate
+    # fails and the runner must revert to the last-good image. Reverted in the
+    # very next commit; must never remain on main.
+    raise SystemExit("ROLLBACK DRILL: intentional startup crash to test auto-rollback")
     cfg = config.load()
     database = db_module.Db(cfg.database_url)
     mail_sender = sender_module.from_config(cfg)
