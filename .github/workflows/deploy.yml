@@ -144,5 +144,11 @@ jobs:
           docker rm -f hanomi-worker 2>$null
           # --restart always => survives reboots + crashes (with dockerd auto-start).
           docker run -d --name hanomi-worker --restart always --env-file C:\hanomi\worker.env $env:IMAGE
-          Start-Sleep -Seconds 8
-          docker ps --filter name=hanomi-worker --format '{{.Names}} {{.Status}}'
+          Start-Sleep -Seconds 15
+          Write-Host "=== docker ps ==="
+          docker ps -a --filter name=hanomi-worker --format '{{.Names}} {{.Status}}'
+          Write-Host "=== container logs ==="
+          docker logs hanomi-worker 2>&1 | Select-Object -Last 40
+          # Health-gate: fail the deploy if the worker isn't actually running.
+          $st = docker inspect -f '{{.State.Running}}' hanomi-worker 2>$null
+          if ($st -ne 'true') { Write-Error "worker container is not running (State.Running=$st)"; exit 1 }
