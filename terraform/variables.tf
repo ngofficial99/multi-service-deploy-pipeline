@@ -32,10 +32,10 @@ variable "linux_machine_type" {
 
 variable "windows_machine_type" {
   type    = string
-  default = "e2-small"
-  # e2-small (2GB) is enough for the Python polling worker. e2-medium (4GB)
-  # only gives Windows extra headroom during the install-heavy first bootstrap;
-  # bump back to e2-medium if the bootstrap is memory-starved on 2GB.
+  default = "e2-standard-2"
+  # Windows Server + Docker (container host) needs real headroom — e2-small (2GB)
+  # was starved and made the bootstrap crawl/hang. e2-standard-2 (2 vCPU / 8GB)
+  # is the right size for a Windows container host.
 }
 
 variable "cloudsql_tier" {
