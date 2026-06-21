@@ -2,21 +2,24 @@
 # of Server Core (1.8–4.8GB). The smaller base is what makes `docker pull` fast
 # and reliable on the VM; Server Core's size was the cause of the slow/hung pull.
 #
-# We build Python in on a Server Core builder, then copy the standalone Python
+# We build Python on a Server Core builder, then copy the standalone Python
 # runtime into Nano Server (which has no installer/shell). ltsc2022 tags match
 # the GCE Windows Server 2022 host (process isolation).
+#
+# NOTE: use FORWARD SLASHES for all container paths. A backslash path like
+# C:\app gets mangled (the \a is eaten) and Docker rejects COPY/WORKDIR with
+# "directory name is invalid". C:/app is unambiguous.
 FROM mcr.microsoft.com/windows/servercore:ltsc2022 AS build
 SHELL ["powershell", "-Command", "$ErrorActionPreference='Stop';"]
 # Embeddable Python is a zip — no installer needed, copies cleanly into Nano.
 RUN Invoke-WebRequest -Uri https://www.python.org/ftp/python/3.12.4/python-3.12.4-embed-amd64.zip -OutFile py.zip ; \
-    Expand-Archive py.zip -DestinationPath C:\python ; \
+    Expand-Archive py.zip -DestinationPath C:/python ; \
     Remove-Item py.zip ; \
-    # Enable site/import of installed packages (embeddable disables it by default)
-    Add-Content C:\python\python312._pth 'import site' ; \
-    Invoke-WebRequest -Uri https://bootstrap.pypa.io/get-pip.py -OutFile C:\python\get-pip.py ; \
-    C:\python\python.exe C:\python\get-pip.py
-COPY requirements.txt C:\app\requirements.txt
-RUN C:\python\python.exe -m pip install --no-cache-dir -r C:\app\requirements.txt
+    Add-Content C:/python/python312._pth 'import site' ; \
+    Invoke-WebRequest -Uri https://bootstrap.pypa.io/get-pip.py -OutFile C:/python/get-pip.py ; \
+    C:/python/python.exe C:/python/get-pip.py
+COPY requirements.txt C:/app/requirements.txt
+RUN C:/python/python.exe -m pip install --no-cache-dir -r C:/app/requirements.txt
 
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2022
 COPY --from=build C:/python C:/python
