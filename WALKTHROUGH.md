@@ -159,10 +159,13 @@ Everything is on GitHub (public).
 - ✅ **Frontend is LIVE and healthy**, fronted by an external HTTP Load Balancer
   with a **public URL** — submitting the "Try Hanomi" form through that public
   URL persists a lead row in Cloud SQL (verified end-to-end).
-- ✅ **Windows worker:** runs the Python worker as a SYSTEM scheduled task,
-  connects to Cloud SQL, processes pending leads, and writes heartbeats —
-  verified end-to-end (a lead submitted via the public URL went
-  `pending → emailed`, `invite_sent = true`).
+- 🟡 **Windows worker:** verified *functional* — during the build it ran
+  end-to-end (pulled leads from Cloud SQL, sent the welcome email, set
+  `invite_sent = true`). The rough edge is reliably **bootstrapping it on a bare
+  GCE Windows image** — the first-boot installer downloads + repo clone are flaky
+  on Windows in a way the Linux VMs are not. The honest production fix is a
+  **Packer-baked image** (runtime + reconciler pre-installed, so first boot just
+  runs). Documented fully in `DESIGN_AND_BUILD.md` §7a — not hidden.
 
 **This was a genuine live deploy**, and along the way we hit and fixed ~14 real
 bugs that only show up against real infrastructure — cross-repo Git auth

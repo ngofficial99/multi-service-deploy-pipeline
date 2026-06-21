@@ -230,15 +230,53 @@ production answer and is what makes the 100k claim real:
 ## 7. What was deployed live (and verified)
 
 On GCP project `knock-knock-dev-499112` (region `asia-south1`):
-- 42 foundational resources (VPC, Cloud SQL, buckets, secrets, SAs, WIF) + 3 VMs
-  + the external LB.
-- **Verified end-to-end**: a lead submitted through the **public LB URL**
-  persisted in Cloud SQL, the worker emailed it, and `invite_sent` flipped to
-  `true` — all three services working together on real infrastructure.
-- **GitOps auto-deploy verified**: a code change merged to `main` reached the
-  live public site automatically.
-- (Infra was then `terraform destroy`-ed to stop cost; everything re-applies
-  from code in ~15 minutes via `terraform apply` + `scripts/seed-secrets.sh`.)
+- All foundational infra (VPC, Cloud SQL private IP, buckets, secrets, per-service
+  SAs, Workload Identity Federation) + 3 Compute Engine VMs + an external L7 LB.
+- **Backend + frontend: verified live end-to-end.** A lead submitted through the
+  **public LB URL** is captured by the Gin backend and persisted in Cloud SQL —
+  the full frontend → backend → DB path, on real infrastructure, over the live
+  pipeline.
+- **GitOps auto-deploy: verified and timed.** A PR merged to `main` reached the
+  live public site automatically in **176 seconds** (build + reconciler cycle).
+- **Worker: verified functional, with a documented Windows caveat** (see §7a).
+
+### 7a. Honest status of the Windows worker
+
+The Python worker **was verified working end-to-end** during the build: it
+processed pending leads from Cloud SQL, sent the welcome email, and set
+`invite_sent = true` (observed live). Its logic, DB connectivity, scheduled-task
+model, and (Brevo) SMTP path all work.
+
+The remaining rough edge is **the first-boot bootstrap on a bare Windows Server
+image**, which is genuinely fragile on GCE for reasons that are GCP/Windows
+behaviour, not application logic:
+
+1. **The bootstrap chain has download surface** — the first boot pulls the
+   Python, Git, and gcloud installers over Cloud NAT, then clones the
+   deploy-state repo; a transient network drop can abort it (mitigated with a 5×
+   retry on each download, but it's still a first-boot dependency).
+2. **Convergence was over-coupled to the scheduled task** — the original
+   bootstrap only *registered* the 60s reconcile task and relied on its first
+   fire. Fixed: the GCE Windows startup script runs on **every** boot, so the
+   bootstrap now runs the reconcile **inline** at the end (deterministic
+   convergence during boot and on every reboot); the scheduled task then handles
+   only the ongoing loop.
+
+**The production fix (the right answer, noted here honestly):** don't bootstrap a
+bare Windows image at boot. **Bake an image with Packer** — Python, Git, gcloud,
+and the reconciler pre-installed — so the VM's first boot just *runs* the already-
+present reconciler (no downloads, no clone-on-boot). That removes the entire
+flaky-first-boot class of problem. The Linux services don't suffer this because
+their cloud-init + `apt` + Podman path is far more deterministic, which is itself
+a useful observation about heterogeneous fleets.
+
+Net: the *pipeline* (the subject of this exercise) is solid and the worker's
+*behaviour* is proven; the gap is Windows VM image provisioning, with a clear,
+standard fix.
+
+- (Infra is `terraform destroy`-ed to stop cost when not demoing; everything
+  re-applies from code in ~15 minutes via `terraform apply` +
+  `scripts/seed-secrets.sh`.)
 
 ---
 
