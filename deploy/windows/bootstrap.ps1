@@ -26,7 +26,7 @@ function Add-MachinePath($p) {
 function Download-WithRetry($url, $out) {
   for ($i = 1; $i -le 5; $i++) {
     try { Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 180
-          if ((Get-Item $out).Length -gt 0) { return } } catch { Write-Host "dl attempt $i: $($_.Exception.Message)" }
+          if ((Get-Item $out).Length -gt 0) { return } } catch { Write-Host "dl attempt ${i}: $($_.Exception.Message)" }
     Start-Sleep -Seconds ($i * 5)
   }
   throw "failed to download $url"
