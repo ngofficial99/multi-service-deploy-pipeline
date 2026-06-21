@@ -27,4 +27,8 @@ COPY . C:/app
 WORKDIR C:/app
 USER ContainerUser
 ENV PATH="C:\python;C:\python\Scripts;C:\Windows\system32;C:\Windows"
+# Embeddable Python does NOT put the script's own dir on sys.path, so
+# `import config` (worker.py's sibling module) fails with ModuleNotFound.
+# PYTHONPATH=C:\app makes the app's own modules importable.
+ENV PYTHONPATH="C:\app"
 ENTRYPOINT ["C:\\python\\python.exe", "worker.py"]
