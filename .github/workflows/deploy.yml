@@ -3,7 +3,12 @@ name: deploy
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force_worker:
+        description: "Force build+deploy of the worker even if apps/worker didn't change (use for a manual rollback to an old SHA)."
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,7 +46,10 @@ jobs:
   # commits to deploy-state. Runs only when the worker changed (and infra exists).
   build-worker-windows:
     needs: changes
-    if: ${{ vars.WIF_PROVIDER != '' && needs.changes.outputs.worker == 'true' }}
+    # Build when the worker changed, OR on a manual dispatch with force_worker
+    # (the rollback path: re-dispatch this workflow against an old SHA + tick
+    # force_worker to rebuild that older source even though nothing "changed").
+    if: ${{ vars.WIF_PROVIDER != '' && (needs.changes.outputs.worker == 'true' || (github.event_name == 'workflow_dispatch' && inputs.force_worker)) }}
     runs-on: windows-latest
     outputs:
       digest: ${{ steps.build.outputs.digest }}
@@ -119,36 +127,89 @@ jobs:
   # Actions runner. This is the verified industry-standard push-CD path for a
   # single Windows VM: the runner pulls the freshly-built image and (re)runs the
   # container locally — no autonomous reconciler, no inbound access, fully
-  # debuggable as a normal CI job.
+  # debuggable as a normal CI job. It captures the currently-running image as
+  # last-good before pulling, health-gates the new container over a ~30s window,
+  # and auto-rolls-back to last-good if the new image is unhealthy — the same
+  # last-good/auto-revert behavior the Linux reconciler gives backend/frontend.
   deploy-worker:
     needs: [changes, build-worker-windows]
-    if: ${{ needs.changes.outputs.worker == 'true' && needs.build-worker-windows.result == 'success' }}
+    # Deploy whenever a fresh image was built (worker changed OR forced rollback).
+    if: ${{ (needs.changes.outputs.worker == 'true' || (github.event_name == 'workflow_dispatch' && inputs.force_worker)) && needs.build-worker-windows.result == 'success' }}
     runs-on: [self-hosted, windows, hanomi-worker]
     steps:
-      - name: Pull + run the worker container
+      - name: Pull + run the worker container (with auto-rollback)
         shell: pwsh
         env:
           IMAGE: ${{ needs.build-worker-windows.outputs.digest }}
           PROJECT: ${{ vars.GCP_PROJECT }}
         run: |
           $ErrorActionPreference = "Stop"
-          # Auth Docker to Artifact Registry via the VM's metadata SA token.
+
+          # --- Capture the CURRENTLY-running image as last-good, for rollback. ---
+          # The image the live container is on right now (empty on first deploy).
+          $lastGood = (docker inspect -f '{{.Config.Image}}' hanomi-worker 2>$null)
+          if ($LASTEXITCODE -ne 0) { $lastGood = "" }
+          if ($lastGood) { Write-Host "last-good image: $lastGood" }
+          else           { Write-Host "no running container yet (first deploy) — no rollback target" }
+
+          # --- Auth Docker to Artifact Registry via the VM's metadata SA token. ---
           $reg = ($env:IMAGE -split "/")[0]
           $tok = (Invoke-RestMethod -Headers @{ "Metadata-Flavor"="Google" } `
             "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token").access_token
           $tok | docker login -u oauth2accesstoken --password-stdin "https://$reg"
-          # Fetch the worker's secret env -> a local file passed to the container.
+
+          # --- Fetch the worker's secret env -> a local file passed to the container. ---
           gcloud secrets versions access latest --secret=hanomi-worker-env --project $env:PROJECT |
             Out-File -Encoding ascii C:\hanomi\worker.env
+
+          # Health check: the container must still be Running after a settle window.
+          # A container that crashes on startup is briefly "running" then exits, so
+          # we poll for ~30s rather than trusting a single early check.
+          function Test-WorkerHealthy {
+            for ($i = 0; $i -lt 6; $i++) {
+              Start-Sleep -Seconds 5
+              $st = docker inspect -f '{{.State.Running}}' hanomi-worker 2>$null
+              if ($st -ne 'true') { return $false }   # exited / crashed
+            }
+            return $true   # still running after the full window
+          }
+
+          # Run a given image as the worker container.
+          function Start-Worker($img) {
+            docker rm -f hanomi-worker 2>$null | Out-Null
+            # --restart always => survives reboots + crashes (with dockerd auto-start).
+            docker run -d --name hanomi-worker --restart always `
+              --env-file C:\hanomi\worker.env $img | Out-Null
+          }
+
+          # --- Deploy the new image. ---
           docker pull $env:IMAGE
-          docker rm -f hanomi-worker 2>$null
-          # --restart always => survives reboots + crashes (with dockerd auto-start).
-          docker run -d --name hanomi-worker --restart always --env-file C:\hanomi\worker.env $env:IMAGE
-          Start-Sleep -Seconds 15
-          Write-Host "=== docker ps ==="
+          Start-Worker $env:IMAGE
+          Write-Host "=== docker ps (new) ==="
           docker ps -a --filter name=hanomi-worker --format '{{.Names}} {{.Status}}'
-          Write-Host "=== container logs ==="
+          Write-Host "=== container logs (new) ==="
           docker logs hanomi-worker 2>&1 | Select-Object -Last 40
-          # Health-gate: fail the deploy if the worker isn't actually running.
-          $st = docker inspect -f '{{.State.Running}}' hanomi-worker 2>$null
-          if ($st -ne 'true') { Write-Error "worker container is not running (State.Running=$st)"; exit 1 }
+
+          if (Test-WorkerHealthy) {
+            Write-Host "✅ worker healthy on new image: $env:IMAGE"
+            exit 0
+          }
+
+          # --- New image is unhealthy: auto-rollback to last-good (Linux parity). ---
+          Write-Warning "new image unhealthy — attempting rollback to last-good"
+          if (-not $lastGood) {
+            Write-Error "no last-good image to roll back to (first deploy failed). Worker is DOWN."
+            exit 1
+          }
+          docker pull $lastGood
+          Start-Worker $lastGood
+          Write-Host "=== container logs (after rollback) ==="
+          docker logs hanomi-worker 2>&1 | Select-Object -Last 40
+          if (Test-WorkerHealthy) {
+            # Rolled back and recovered — still FAIL the job so the bad deploy is loud,
+            # but the live worker is back on the previous good image.
+            Write-Error "DEPLOY FAILED: new image unhealthy; rolled back to last-good ($lastGood), which is healthy. Worker is up on the OLD version."
+            exit 1
+          }
+          Write-Error "DEGRADED: new image unhealthy AND rollback to last-good ($lastGood) failed. Worker is DOWN — manual intervention required."
+          exit 1

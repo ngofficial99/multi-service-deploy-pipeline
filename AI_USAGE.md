@@ -40,9 +40,10 @@ a 2026 cutoff**, and pointed to **Podman + Quadlet** as the current self-healing
 reconciler. Claims were adversarially verified before I acted on them.
 
 **Implementation.** Scaffolded the three apps (Go/Gin, Python worker, Next.js),
-both Terraform modules, the Linux + Windows reconcilers, and the GitHub Actions
-workflow. I had it verify the apps end-to-end locally with `docker compose`
-(form submission → lead row → worker email) before moving on.
+both Terraform modules, the Linux reconciler, the Windows worker's container +
+self-hosted-runner deploy path, and the GitHub Actions workflow. I had it verify
+the apps end-to-end locally with `docker compose` (form submission → lead row →
+worker email) before moving on.
 
 **Live deployment & debugging.** This was the highest-value part. We applied the
 infra to a real GCP project and debugged the real failures that only appear

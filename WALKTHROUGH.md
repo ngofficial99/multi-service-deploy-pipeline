@@ -159,14 +159,16 @@ Everything is on GitHub (public).
 - ✅ **Frontend is LIVE and healthy**, fronted by an external HTTP Load Balancer
   with a **public URL** — submitting the "Try Hanomi" form through that public
   URL persists a lead row in Cloud SQL (verified end-to-end).
-- **Windows worker:** a DB-queue consumer — polls `pending` leads
+- ✅ **Windows worker is LIVE:** a DB-queue consumer — polls `pending` leads
   (`FOR UPDATE SKIP LOCKED`), sends the welcome email, marks them
-  `invite_sent = true` — running as a SYSTEM scheduled task (a separate track
-  from the Linux services, since systemd/Podman are Linux-only). **In the live
-  demo the worker VM is stopped to control cost**; start it with
-  `gcloud compute instances start hanomi-worker --zone asia-south1-a` before a
-  walkthrough. (Production note: bake the worker image with Packer — see
-  `DESIGN_AND_BUILD.md`.)
+  `invite_sent = true`. It runs as a **Windows container** (Nano Server + Python)
+  on the worker VM, deployed by a **self-hosted GitHub Actions runner** on that VM
+  (`docker pull` + `docker run --restart always`) — a separate track from the
+  Linux services, since systemd/Podman are Linux-only. Verified end-to-end:
+  `worker_online: true` and a submitted lead is picked up and processed (email
+  delivery goes via Brevo once the VM's NAT egress IP is allow-listed there — an
+  account setting, not a system limitation). (Production note: bake the VM image
+  with Packer — see `DESIGN_AND_BUILD.md`.)
 
 **This was a genuine live deploy**, and along the way we hit and fixed ~14 real
 bugs that only show up against real infrastructure — cross-repo Git auth
@@ -175,9 +177,11 @@ Registry authentication, gcloud not being preinstalled, Podman 4.3.1 lacking
 Quadlet (so the reconciler generates a plain systemd `podman run` unit), the
 rollout gate needing to match the *deployed digest*, a hardcoded backend IP that
 broke on VM recreation (fixed by using GCE's stable internal DNS name), and a
-string of Windows-worker issues (winget unavailable to SYSTEM, an empty env
-file, git sync, gcloud copy paths, `python` not being a valid Windows service,
-and a SYSTEM-task PATH gap — all fixed). The full list is in `DESIGN_AND_BUILD.md`.
+string of Windows-worker issues (the VM being RAM-starved on `e2-small`, the
+runner-registration PAT needing Administration scope, the Docker named-pipe being
+denied to a non-SYSTEM runner, Windows path mangling in the Dockerfile, and
+embeddable Python ignoring `PYTHONPATH` — all fixed). The full list is in
+`DESIGN_AND_BUILD.md`.
 "Debugged it against real cloud" is the strongest part of the story.
 
 **Cost note:** Cloud SQL + 3 VMs (incl. one Windows VM) are running and billing.
@@ -193,7 +197,7 @@ apps/backend      Go/Gin API + DB migrations
 apps/frontend     Next.js landing page + /try form
 apps/worker       Python lead-emailer
 deploy/linux      Podman + generated-systemd-unit reconciler + 60s timer (Linux agent)
-deploy/windows    PowerShell reconciler + scheduled-task worker (the worker agent)
+deploy/windows    bootstrap.ps1 (Docker + self-hosted GitHub Actions runner)
 deploy/state      example desired-state files (the real ones live in the
                   separate hanomi-deploy-state repo)
 terraform/        base infra (VPC, Cloud SQL, VMs, secrets, WIF)

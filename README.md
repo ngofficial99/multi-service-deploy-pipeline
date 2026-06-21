@@ -7,7 +7,7 @@ A deploy pipeline for the Hanomi stack — three services, each on its own VM
 |---|---|---|---|
 | **backend** | Go + Gin | Linux | Podman container under a systemd unit |
 | **frontend** | Next.js | Linux | Podman container under a systemd unit |
-| **worker** | Python | Windows | native Windows Service |
+| **worker** | Python | Windows | Windows container (Docker), deployed via a self-hosted GitHub Actions runner |
 
 They form one coherent product slice: the **frontend** is the Hanomi landing
 page with a "Try Hanomi" demo form; the **backend** captures each lead into
@@ -32,14 +32,14 @@ Hanomi welcome message, recording that the invite was sent.
    ▼                                                │ Artifact Registry: <svc>@sha256:…     │
  deploy-state repo (GitOps desired state)           │ Secret Manager: hanomi/<svc>/*        │
    backend/desired.yaml  → image@sha256             │ GCS: state/<svc>/actual.json (gate)   │
-   worker/desired.yaml   → image@sha256             │ GCS: worker/<digest>/ (win source)    │
-   frontend/desired.yaml → image@sha256             │                                       │
-        ▲ reconcilers git-pull (~60s)               │ ┌──────── VPC (custom) ────────────┐  │
+   frontend/desired.yaml → image@sha256             │ (worker: deployed by its self-hosted  │
+        ▲ reconcilers git-pull (~60s) [Linux]       │  runner on the VM, not via deploy-state)│
+        │                                           │ ┌──────── VPC (custom) ────────────┐  │
         │                                           │ │ Private Google Access + Cloud NAT │  │
         └───────────── pulled by ───────────────────┼─┤ NO external IPs on any VM         │  │
                                                      │ │  backend  VM (Linux)  Podman+Quadlet│
                                                      │ │  frontend VM (Linux)  Podman+Quadlet│
-                                                     │ │  worker   VM (Windows) Win Service  │
+                                                     │ │  worker   VM (Windows) container+runner│
                                                      │ │  Private Services Access            │
                                                      │ │   └ Cloud SQL Postgres (PRIVATE IP) │
                                                      │ └───────────────────────────────────┘ │
@@ -52,14 +52,17 @@ Hanomi welcome message, recording that the invite was sent.
 2. **Change detection** — only services whose code changed are built (in the
    real submodule layout this is "which submodule pointer moved").
 3. **Build once** → push image to Artifact Registry, referenced by **immutable
-   digest** (`@sha256:…`). The Windows worker's source is also published to GCS
-   per digest (it runs as a process, not a container).
-4. **Sequential gated rollout** `backend → worker → frontend`. For each: CI
-   commits the digest to `deploy-state`, then **polls the VM's `actual.json`**
-   in GCS until it reports healthy. Only then does the next service start.
-5. Each VM's reconciler (git-poll ~60s) pulls the new digest, fetches secrets,
-   runs migrations (backend), swaps the running version, health-checks, and
-   writes `{sha, healthy, error}` back to GCS.
+   digest** (`@sha256:…`). The Windows worker image is built on a `windows-latest`
+   runner (Linux runners can't build Windows images).
+4. **Two deploy paths, by OS:**
+   - **Linux (backend, frontend):** CI commits the digest to the `deploy-state`
+     repo; each VM's reconciler (git-poll ~60s) pulls it, fetches secrets, runs
+     migrations (backend), swaps the container, health-checks, and writes
+     `{sha, healthy, error}` to GCS, which CI gates on.
+   - **Windows (worker):** a `deploy-worker` job runs **on the VM's own
+     self-hosted GitHub Actions runner** — `docker pull` + `docker run
+     --restart always` — and health-gates on the container actually running.
+     This is the standard single-Windows-VM push-CD pattern.
 
 ---
 
@@ -72,7 +75,7 @@ Hanomi welcome message, recording that the invite was sent.
 | Desired state | **GitOps repo** (`deploy-state`) | A deploy is a commit; rollback is `git revert`; full audit trail. VMs need only *read* access. |
 | Change signal | **Git poll (~60s)** | The GitOps invariant; also self-healing (corrects drift even with no push). Tradeoff: up-to-60s deploy latency. Considered Pub/Sub push — rejected as over-engineering for a 3-VM fleet. |
 | Linux runtime | **Podman container under a generated systemd unit** | The reconciler generates a systemd unit running `podman run`, giving `Restart=always` self-heal. **Rejected the GCP-native `gce-container-declaration`/konlet path because it is deprecated** (deprecated 2025-07-21; VM-create stops 2026-07-31). Considered Quadlet but Debian 12 ships Podman 4.3.1 (Quadlet needs ≥4.4), so a generated unit is the portable choice. Google now directs users to startup-script / cloud-init, which is exactly what we use to install Podman. |
-| Windows runtime | **scheduled task running the Python worker** | systemd/Podman-Quadlet are Linux-only and Windows containers are heavy. A bare `python.exe` can't be an `sc.exe` service (no SCM protocol → error 1053), so the worker runs as a SYSTEM **scheduled task** with auto-restart; health = a fresh DB heartbeat. A deliberate, honest second track. |
+| Windows runtime | **Windows container (Nano Server) via Docker**, deployed by a **self-hosted GitHub Actions runner on the VM** | systemd/Podman are Linux-only, so the Windows worker is a deliberate second track. The verified industry-standard pattern for a single Windows VM: the worker ships as a Windows container image (Nano Server + Python, ~280MB); a self-hosted runner on the VM runs `docker pull` + `docker run --restart always` as a normal CI job on each merge. (Researched: rejected an autonomous pull-reconciler and Server Core — the runner is debuggable as a CI job and Nano Server pulls fast.) |
 | Versioning | **immutable digest-pinned images** | Deterministic rollback, no rebuild. (Note: this is why we do **not** use `podman auto-update` to deploy — it tracks a moving tag and conflicts with digest pinning; CI drives the version change instead.) |
 | Actual/health state | VM writes `actual.json` to **GCS** | Clean split: Git = desired, GCS = actual. Avoids VMs needing Git *write* access. |
 | Database | **Cloud SQL Postgres, private IP only** | No public endpoint; reached over Private Services Access. IAM DB auth enabled; password fallback in Secret Manager. |
@@ -84,29 +87,72 @@ Hanomi welcome message, recording that the invite was sent.
 
 ## Rollback & partial-failure behaviour
 
-Rollback is **a `git revert` of the digest** in `deploy-state` (the reconciler
-pulls the previous digest and converges). On the VM, Podman also keeps the
-last-good image for an instant local fallback. Sub-second, deterministic, no
-rebuild.
+**Every service auto-rolls-back on a failed deploy** — Linux and Windows alike —
+and a failed deploy never silently leaves a service down.
 
-What happens to each service when something fails mid-rollout
-(order is `backend → worker → frontend`):
+**Linux services (backend, frontend).** Rollback is **a `git revert` of the
+digest** in `deploy-state` (the reconciler pulls the previous digest and
+converges). The reconciler also keeps a `last-good` digest on the VM: if a new
+image fails its health check it **auto-reverts to last-good on that VM** and
+re-health-checks, no rebuild. Podman keeps the last-good image locally for an
+instant swap.
 
-| Failure point | backend | worker | frontend | Pipeline |
+**Windows worker.** The `deploy-worker` job captures the currently-running image
+as last-good *before* pulling, health-gates the new container over a ~30s window,
+and **auto-reverts to last-good if the new image is unhealthy** — the same
+last-good/auto-revert behaviour as Linux, implemented on the VM's self-hosted
+runner. The job still goes red so a bad deploy is loud, but the live worker is
+back on the previous good image.
+
+What happens to each service when something fails:
+
+| Failure point | backend | frontend | worker | Outcome |
 |---|---|---|---|---|
-| **backend deploy fails** | self-reverts to last-good, re-health-checks | not started | not started | fails loudly at the backend gate |
-| **worker deploy fails** | stays on new version | self-reverts to last-good | **never touched** (rollout stopped) | fails at the worker gate |
-| **frontend deploy fails** | stays on new | stays on new | self-reverts to last-good | fails at the frontend gate |
-| **rollback itself fails** | writes `degraded` to `actual.json` | — | — | CI sees `degraded`, alerts, fleet freezes — never silent-loops; manual runbook below |
+| **backend deploy fails** | self-reverts to last-good, re-health-checks | **never touched** (rollout stopped at the backend gate) | independent track, unaffected | `deploy` job fails loudly |
+| **frontend deploy fails** | stays on last-good | self-reverts to last-good | independent track, unaffected | `deploy` job fails at the frontend gate |
+| **worker deploy fails** | unaffected | unaffected | self-reverts to last-good image, re-checks | `deploy-worker` job fails (red), worker stays on old version |
+| **a rollback itself fails** | writes `degraded` to `actual.json` → CI alerts, fleet freezes | — | `deploy-worker` errors `DEGRADED: … Worker is DOWN` | never silent-loops; manual runbook below |
 
-Because services are **independently versioned** (no forced lockstep) and the
-backend deploys first, the frontend is never stranded against an incompatible
-backend: if the worker fails we stop *before* touching the frontend.
+Linux services are **independently versioned** and the backend deploys first, so
+the frontend is never stranded against an incompatible backend (if the backend
+gate fails we stop *before* touching the frontend). The worker is a separate
+track (Windows), so a worker failure can't block the Linux rollout and vice-versa.
 
-**Manual runbook (degraded):** SSH/RDP to the affected VM via IAP (the only
-admin path); inspect `journalctl -u <svc>` (Linux) / the Windows event log;
-the reconciler logged the failing digest. Fix forward by committing a known-good
-digest to `deploy-state`, or roll back the migration if the schema is the cause.
+### Manual rollback runbook (when you need the last stable image now)
+
+The new image is broken and you want the previous one back. Pick by urgency:
+
+1. **Fastest — re-run the last-good container on the VM** (no CI, ~30s). RDP/SSH
+   to the worker VM (Linux: the analogous step is `git revert` below):
+   ```powershell
+   # list recent worker images, newest first (tags are git SHAs):
+   gcloud artifacts docker images list \
+     asia-south1-docker.pkg.dev/<PROJECT>/hanomi/worker \
+     --include-tags --sort-by="~UPDATE_TIME" --limit=10
+   docker rm -f hanomi-worker
+   docker run -d --name hanomi-worker --restart always \
+     --env-file C:\hanomi\worker.env \
+     asia-south1-docker.pkg.dev/<PROJECT>/hanomi/worker:<PREVIOUS_GOOD_SHA>
+   ```
+2. **Clean / auditable — re-dispatch the pipeline at the last-good commit.** The
+   `deploy` workflow has a `workflow_dispatch` with a **`force_worker`** input so
+   a manual run rebuilds + redeploys the worker even though nothing "changed":
+   ```bash
+   gh workflow run deploy.yml --ref <PREVIOUS_GOOD_SHA> -f force_worker=true
+   ```
+   (Linux services redeploy from that ref automatically; tick `force_worker` so
+   the Windows worker rolls back too.)
+3. **Audit-correct — `git revert`.** Undo the bad commit so `main` reflects
+   reality; the push re-fires the pipeline and rebuilds from the good source:
+   ```bash
+   git revert <bad_commit_sha> && git push origin main
+   ```
+
+**Degraded (rollback itself failed):** RDP/SSH to the VM via IAP (the only admin
+path); inspect `journalctl -u <svc>` (Linux) / `docker logs hanomi-worker` +
+Windows event log; the reconciler/`deploy-worker` job logged the failing digest.
+Fix forward by deploying a known-good digest, or roll back the migration if the
+schema is the cause.
 
 ---
 
@@ -115,8 +161,11 @@ digest to `deploy-state`, or roll back the migration if the schema is the cause.
 - **backend** `GET /healthz` — 200 only if Postgres is reachable; also reports
   `worker_online` (derived from the worker's heartbeat freshness).
 - **frontend** `GET /api/health` — 200 only if it can reach the backend.
-- **worker** — health is a **heartbeat row** written to Postgres each cycle;
-  the reconciler checks the row's age (< 60s) plus that the service is Running.
+- **worker** — two layers: at deploy time the `deploy-worker` job gates on the
+  container staying `State.Running` over a ~30s window (and auto-rolls-back if
+  not); at runtime health is a **heartbeat row** written to Postgres each cycle,
+  surfaced as `worker_online` by the backend `/healthz`. `docker run --restart
+  always` self-heals crashes between deploys.
 
 ---
 

@@ -43,14 +43,14 @@ behaves identically whether there is 1 instance or 100.
    ▼                                                │ Artifact Registry: <svc>@sha256:…     │
  deploy-state repo (GitOps desired state)           │ Secret Manager: hanomi/<svc>/*        │
    backend/desired.yaml  → image@sha256             │ GCS: state/<svc>/actual.json (gate)   │
-   worker/desired.yaml   → image@sha256             │ GCS: worker/<digest>/ (win source)    │
-   frontend/desired.yaml → image@sha256             │                                       │
-        ▲ reconcilers (~60s)                        │ ┌──────── VPC (custom) ────────────┐  │
+   frontend/desired.yaml → image@sha256             │ (worker: deployed by its self-hosted  │
+        ▲ reconcilers (~60s)  [Linux only]          │  runner, not via deploy-state)        │
+        │                                           │ ┌──────── VPC (custom) ────────────┐  │
         │                                           │ │ Private Google Access + Cloud NAT │  │
         └───────────── pulled by ───────────────────┼─┤ NO external IPs on any VM         │  │
                                                      │ │  backend  VM (Linux)  podman+systemd│
                                                      │ │  frontend VM (Linux)  podman+systemd│
-                                                     │ │  worker   VM (Windows) scheduled task│
+                                                     │ │  worker   VM (Windows) container + runner│
                                                      │ │  external L7 LB ─► frontend         │
                                                      │ │  Private Services Access            │
                                                      │ │   └ Cloud SQL Postgres (PRIVATE IP) │
@@ -102,7 +102,7 @@ invited?" signal, separate from the processing `status`.
 | Change signal | **Git poll ~60s** | The GitOps invariant; self-healing (corrects drift with no push) | Pub/Sub push (rejected as over-engineering for 3 VMs) |
 | Cross-repo push auth | **SSH deploy key** scoped to deploy-state | Tightly scoped to one repo; unambiguous vs the main-repo `GITHUB_TOKEN` | Fine-grained PAT (hit a 403 + scoping pitfalls live) |
 | Linux container runtime | **Podman + generated systemd unit** | `Restart=always` self-heal; works on any Podman version | GCP konlet (**deprecated, 2026 cutoff**); Quadlet (needs Podman ≥4.4; Debian 12 has 4.3.1) |
-| Windows worker runtime | **SYSTEM scheduled task** running Python | A bare `python.exe` can't be an `sc.exe` service (error 1053); scheduled task fits a polling loop | `sc.exe` service (failed); Windows containers (heavy) |
+| Windows worker runtime | **Windows container (Nano Server) via Docker**, deployed by a **self-hosted GitHub Actions runner on the VM** | Verified industry-standard for a single Windows VM: the worker ships as a container image; the runner does `docker pull`/`run --restart always` as a normal, debuggable CI job. | Autonomous pull-reconciler / scheduled-task (fragile first-boot, opaque hangs); `sc.exe` service for bare python (error 1053); Server Core base (1.8–4.8GB, slow pull → Nano Server ~280MB) |
 | Image versioning | **Immutable digest (`@sha256`)** | Deterministic rollback, no rebuild | Moving tags / `podman auto-update` (conflicts with digest pinning) |
 | Actual/health state | VM writes `actual.json` to **GCS** | Git=desired, GCS=actual; no Git *write* creds on VMs | VMs committing status to Git (commit races, noisy) |
 | DB | **Cloud SQL Postgres, private IP** | No public endpoint; reached over Private Services Access | Public IP + authorized networks (weaker) |
@@ -130,7 +130,8 @@ invited?" signal, separate from the processing `status`.
   units.
 - **systemd** — supervises the Linux containers (`Restart=always`) + runs the
   reconciler on a 60s timer.
-- **Windows Scheduled Tasks** — run the worker + its reconciler on the Windows VM.
+- **Docker (Windows containers)** + a **self-hosted GitHub Actions runner** —
+  run + deploy the worker on the Windows VM.
 - **Cloud SQL Postgres 16** — the shared datastore / job queue.
 - **gcloud CLI** — used on the VMs (secrets fetch, GCS read/write, registry
   auth) and for the live deploy/debug.
@@ -152,43 +153,61 @@ invited?" signal, separate from the processing `status`.
 3. Locally: `docker compose -f dev/docker-compose.yml up --build` runs all three
    apps + Postgres; the worker writes emails to `dev/outbox/`.
 
-### 6b. CI/CD perspective (`rollout.sh`)
+### 6b. CI/CD perspective
 1. `changes` job (paths-filter) decides which of backend/worker/frontend changed.
-2. `deploy` job authenticates to GCP via **WIF** (no keys), then for each changed
-   service **in order** (backend → frontend → worker):
+2. **Linux services** (`deploy` job → `rollout.sh`): authenticate to GCP via
+   **WIF** (no keys), then for each changed service **in order** (backend →
+   frontend):
    a. `docker build` once, push to Artifact Registry, resolve the **immutable
       digest**.
-   b. (worker only) publish the pinned Python source to a per-digest GCS prefix.
-   c. Commit the digest to `deploy-state/state/<svc>/desired.yaml` (this **is**
+   b. Commit the digest to `deploy-state/state/<svc>/desired.yaml` (this **is**
       the deploy) — pushed over the SSH deploy key.
-   d. **Gate**: poll `gs://…/state/<svc>/actual.json` until it reports
+   c. **Gate**: poll `gs://…/state/<svc>/actual.json` until it reports
       `healthy:true` **for that exact digest** (not a stale healthy), or fail.
-3. A failed gate aborts the rollout (set -e), so later services are never
+   A failed gate aborts the rollout (`set -e`), so later services are never
    touched — the partial-failure policy.
+3. **Windows worker** (`build-worker-windows` + `deploy-worker` jobs): the image
+   is built + pushed on a hosted Windows runner (Windows containers need a
+   Windows host), then the `deploy-worker` job runs **on the worker VM's own
+   self-hosted runner** — `docker pull` the pinned digest, `docker run --restart
+   always`, and health-gate on the container being up. This is the standard
+   push-CD path for a single Windows VM (no deploy-state, no reconciler).
 
-### 6c. VM / data-plane perspective (the reconciler)
-On each VM, every ~60s:
+### 6c. VM / data-plane perspective
+**Linux services (the reconciler), every ~60s:**
 1. `git fetch/reset` the deploy-state repo → read the pinned digest.
 2. If it differs from what's running: fetch the service's secret from Secret
    Manager into a `0600` env file; authenticate Podman to Artifact Registry via
    the VM's metadata SA token; `podman pull` the image; (backend) run migrations;
-   generate/refresh the systemd unit (Linux) or scheduled task (Windows); restart.
-3. Health-check the new version (HTTP `/healthz`/`/api/health`, or worker
-   heartbeat freshness).
+   generate/refresh the systemd unit; restart.
+3. Health-check the new version (HTTP `/healthz` / `/api/health`).
 4. On pass: record last-good, write `actual.json{healthy:true,sha,…}` to GCS.
    On fail: roll back to last-good, re-check, write the failure/degraded state.
 
+**Windows worker (the self-hosted runner), on each merge:** the `deploy-worker`
+job runs on the VM's runner → fetch the worker secret → `docker pull` the
+container image → `docker run --restart always` → health-gate on the container
+running. Health is then a fresh `worker_heartbeat` row in Postgres (surfaced as
+`worker_online` by the backend `/healthz`).
+
 ### 6d. Operator perspective
-- **Deploy**: merge to main. **Rollback**: `git revert` the digest commit in
-  deploy-state (the reconciler converges back; Podman also keeps the last-good
-  image locally for instant fallback).
+- **Deploy**: merge to main.
+- **Auto-rollback (both VM families)**: a failed health check after a deploy
+  auto-reverts to the last-good image — on Linux the reconciler reverts to its
+  last-good digest; on Windows the `deploy-worker` job captures the running image
+  before pulling and `docker run`s it back if the new container fails its ~30s
+  health gate (the job still goes red so the bad deploy is loud).
+- **Manual rollback**: `git revert` the digest commit in deploy-state (Linux
+  reconciler converges back; Podman keeps the last-good image locally for instant
+  fallback), or re-dispatch the pipeline at the last-good SHA with
+  `force_worker=true` to roll the Windows worker back. Full runbook in the README.
 - **Observe**: `actual.json` per service in GCS is the source of truth for what's
   running and healthy; the backend `/healthz` reports `worker_online` from the
   heartbeat.
-- **Degraded**: if a deploy and its rollback both fail, the reconciler writes a
-  `degraded` state and the fleet freezes — it never silent-loops. (On Windows,
-  the reconciler also dumps diagnostics to GCS — that's how the worker was
-  debugged with no SSH/RDP.)
+- **Degraded**: if a deploy and its rollback both fail, the Linux reconciler
+  writes a `degraded` state and the fleet freezes; the Windows `deploy-worker`
+  job errors `DEGRADED … Worker is DOWN`. Neither silent-loops. (The Linux
+  reconciler also dumps diagnostics to GCS.)
 
 ### 6e. Security perspective
 - **No static keys anywhere**: CI uses WIF (short-lived OIDC); VMs use their
@@ -238,14 +257,14 @@ On GCP project `knock-knock-dev-499112` (region `asia-south1`):
   pipeline.
 - **GitOps auto-deploy: verified and timed.** A PR merged to `main` reached the
   live public site automatically in **176 seconds** (build + reconciler cycle).
-- **Worker (Python, Windows):** a DB-queue consumer — polls `pending` leads with
-  `FOR UPDATE SKIP LOCKED`, sends the welcome email (Brevo SMTP), and marks them
-  `invite_sent = true`. It runs as a SYSTEM scheduled task — a deliberately
-  separate track from the Linux services, since systemd/Podman are Linux-only,
-  so the Windows worker uses a scheduled task + the same git-poll reconcile loop
-  in PowerShell. **In the live demo the worker VM is stopped to control cost**;
-  start it before a walkthrough with
-  `gcloud compute instances start hanomi-worker --zone asia-south1-a`.
+- **Worker (Python, Windows): verified live.** A DB-queue consumer — polls
+  `pending` leads with `FOR UPDATE SKIP LOCKED`, sends the welcome email (Brevo
+  SMTP), and marks them `invite_sent = true`. It runs as a **Windows container**
+  (Nano Server + Python) on the worker VM, deployed by a **self-hosted GitHub
+  Actions runner** on that VM (`docker pull` + `docker run --restart always`).
+  Confirmed end-to-end: `worker_online: true`, a lead submitted via the public URL
+  was picked up and processed (email send goes via Brevo once the VM's egress IP
+  is allow-listed in Brevo — an account setting, not a system limitation).
 
 > **Production note on the Windows worker image:** the worker VM bootstraps from
 > a base Windows image at first boot (installs Python/Git/gcloud, clones
@@ -278,17 +297,32 @@ the system actually works:
    instead.
 6. **Gate passed on stale health** — gate now matches the **deployed digest**.
 7. **Hardcoded backend IP broke on VM recreate** — use **GCE internal DNS**.
-8. **Windows `winget` unavailable to SYSTEM** — install Python/git/gcloud via
-   direct silent installers.
-9. **Empty `worker.env`** — PowerShell pipe to `Out-File` produced empty; use
-   `[IO.File]::WriteAllText`.
-10. **`git pull` "multiple branches"** — use `fetch` + `reset --hard`.
-11. **`gcloud rsync` mangled Windows filenames** — use `cp -r .../<key>/*`.
-12. **`python` not an SCM service (1053)** — run the worker as a **scheduled
-    task**.
-13. **SYSTEM task stale PATH** — resolve `python`/`gcloud` to **absolute paths**.
-14. **Reconcile task pile-up** — `MultipleInstances IgnoreNew` + a 5-min
-    execution limit.
+8. **Windows VM bootstrap hung / runner wouldn't register** — `e2-small` (2GB)
+   was RAM-starved for a Docker + runner host; resized to **`e2-standard-2`
+   (8GB)**. This was the breakthrough — the bootstrap then completed in minutes.
+9. **Runner-registration PAT 403 ("Resource not accessible")** — minting a
+   runner registration token needs **repo Administration** scope, not just
+   Contents; supplied an admin-scoped PAT (stored in Secret Manager, never on
+   disk).
+10. **`docker pull/run` "open //./pipe/docker_engine: Access is denied"** — the
+    runner ran as `NetworkService`, which can't reach the Docker named pipe
+    (ACL'd to Administrators/SYSTEM). Reconfigured the runner service to run as
+    **`NT AUTHORITY\SYSTEM`**. (The `daemon.json "group":"docker"` workaround does
+    **not** apply on Windows — verified via research.)
+11. **Dockerfile `COPY`/`WORKDIR` "directory name is invalid"** — a backslash
+    path like `C:\app` gets mangled (`\a` eaten); use **forward slashes**
+    (`C:/app`).
+12. **`import config` ModuleNotFoundError in the container** — embeddable Python
+    ignores `PYTHONPATH` and lets `python312._pth` fully control `sys.path`; added
+    `C:\app` (and `import site`) to the `._pth`.
+13. **Hosted Windows runner "daemon not running" on build** — Windows Server
+    2022 runs the Windows Docker engine by default; removed the spurious
+    engine-switch and built with `pwsh`. A transient daemon hiccup was cleared by
+    a re-trigger (no code change).
+14. **Worker email `(525, '5.7.1 Unauthorized IP address')`** — Brevo SMTP
+    rejects un-allow-listed senders; the worker's egress is the Cloud NAT IP,
+    which must be added to **Brevo → Authorised IPs**. (An external account
+    setting — the send path itself is correct.)
 
 ---
 
@@ -301,7 +335,7 @@ apps/worker        Python lead-emailer (DB-queue consumer, heartbeat)
 db/schema.sql      schema reference (migrations are source of truth)
 dev/               docker-compose for local end-to-end
 deploy/linux       reconciler.sh + systemd timer/unit + cloud-init startup
-deploy/windows     bootstrap.ps1, reconciler.ps1, install-service.ps1, startup tpl
+deploy/windows     bootstrap.ps1 (docker + self-hosted runner install), startup tpl
 deploy/state       desired-state examples (real ones live in hanomi-deploy-state)
 terraform/         base infra (VPC, Cloud SQL, VMs, secrets, WIF, external LB)
 terraform/scaling  production MIGs + autoscalers + internal LB + read replicas
