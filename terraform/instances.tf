@@ -60,9 +60,8 @@ resource "google_compute_instance" "windows" {
 
   metadata = {
     windows-startup-script-ps1 = templatefile("${path.module}/../deploy/windows/startup.ps1.tftpl", {
-      state_repo_url  = var.state_repo_url
-      state_bucket    = google_storage_bucket.state.name
-      artifact_bucket = google_storage_bucket.artifacts.name
+      github_repo   = var.github_repo
+      runner_secret = google_secret_manager_secret.runner_pat.secret_id
     })
   }
 

@@ -76,10 +76,8 @@ jobs:
           "digest=$DIGEST" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
   deploy:
-    needs: [changes, build-worker-windows]
-    # build-worker-windows is skipped when the worker didn't change; `always()`
-    # lets deploy still run, and we guard inside on success/skip.
-    if: ${{ always() && vars.WIF_PROVIDER != '' && needs.build-worker-windows.result != 'failure' }}
+    needs: changes
+    if: ${{ vars.WIF_PROVIDER != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -104,16 +102,47 @@ jobs:
           chmod 0600 "$HOME/.ssh/state_key"
           echo "STATE_SSH_KEY=$HOME/.ssh/state_key" >> "$GITHUB_ENV"
 
-      # Build-once (Linux services here; the Windows worker image was built by the
-      # build-worker-windows job and passed in as WORKER_IMAGE), digest-pin,
-      # commit-to-state, then gate on actual.json. Order: backend -> frontend ->
-      # worker; a failed gate halts the rollout.
-      - name: Rollout
+      # Linux services (backend, frontend) deploy via the GitOps reconciler:
+      # build-once, digest-pin, commit-to-state, gate on actual.json. The worker
+      # is Windows and deploys via the deploy-worker job below (self-hosted runner
+      # ON the worker VM) — the standard push-CD pattern for a single Windows VM.
+      - name: Rollout (backend, frontend)
         run: ./.github/scripts/rollout.sh
         env:
           DEPLOY_BACKEND: ${{ needs.changes.outputs.backend }}
-          DEPLOY_WORKER: ${{ needs.changes.outputs.worker }}
           DEPLOY_FRONTEND: ${{ needs.changes.outputs.frontend }}
-          WORKER_IMAGE: ${{ needs.build-worker-windows.outputs.digest }}
+          DEPLOY_WORKER: "false"
           GIT_SHA: ${{ github.sha }}
           STATE_REPO: ${{ vars.STATE_REPO }}
+
+  # Deploy the worker by running ON the worker VM via its self-hosted GitHub
+  # Actions runner. This is the verified industry-standard push-CD path for a
+  # single Windows VM: the runner pulls the freshly-built image and (re)runs the
+  # container locally — no autonomous reconciler, no inbound access, fully
+  # debuggable as a normal CI job.
+  deploy-worker:
+    needs: [changes, build-worker-windows]
+    if: ${{ needs.changes.outputs.worker == 'true' && needs.build-worker-windows.result == 'success' }}
+    runs-on: [self-hosted, windows, hanomi-worker]
+    steps:
+      - name: Pull + run the worker container
+        shell: pwsh
+        env:
+          IMAGE: ${{ needs.build-worker-windows.outputs.digest }}
+          PROJECT: ${{ vars.GCP_PROJECT }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Auth Docker to Artifact Registry via the VM's metadata SA token.
+          $reg = ($env:IMAGE -split "/")[0]
+          $tok = (Invoke-RestMethod -Headers @{ "Metadata-Flavor"="Google" } `
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token").access_token
+          $tok | docker login -u oauth2accesstoken --password-stdin "https://$reg"
+          # Fetch the worker's secret env -> a local file passed to the container.
+          gcloud secrets versions access latest --secret=hanomi-worker-env --project $env:PROJECT |
+            Out-File -Encoding ascii C:\hanomi\worker.env
+          docker pull $env:IMAGE
+          docker rm -f hanomi-worker 2>$null
+          # --restart always => survives reboots + crashes (with dockerd auto-start).
+          docker run -d --name hanomi-worker --restart always --env-file C:\hanomi\worker.env $env:IMAGE
+          Start-Sleep -Seconds 8
+          docker ps --filter name=hanomi-worker --format '{{.Names}} {{.Status}}'

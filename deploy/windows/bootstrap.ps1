@@ -1,129 +1,94 @@
-# One-time bootstrap for the Windows worker VM (invoked by the Terraform
-# windows-startup-script). The worker runs as a WINDOWS CONTAINER, so the host
-# only needs Docker (Containers feature) + git + gcloud — NOT a Python install.
-# Clones the deploy-state repo, registers the reconciler as a 60s Scheduled Task,
-# and runs one reconcile inline. Idempotent: safe to run on every boot.
+# One-time bootstrap for the Windows worker VM (GCE windows-startup-script).
 #
-# NOTE: we deliberately avoid `winget` — it is NOT available to the SYSTEM
-# account in the GCE Windows Server startup-script context. We install via
-# direct silent installers / the Docker static binaries instead.
+# The worker deploys via a GitHub Actions SELF-HOSTED RUNNER installed here — the
+# verified industry-standard push-CD path for a single Windows VM. This script:
+#   1. installs Docker EE (Containers feature + Moby static binaries, dockerd as
+#      a Windows service so containers survive reboot)
+#   2. installs the GitHub Actions runner and registers it as a Windows service,
+#      labelled [self-hosted, windows, hanomi-worker]
+# Then `merge to main` runs the deploy-worker job ON this VM (docker pull/run).
+# No autonomous reconciler, no deploy-state clone. Idempotent across reboots.
 param(
-  [Parameter(Mandatory = $true)][string]$StateRepoUrl,
-  [Parameter(Mandatory = $true)][string]$StateBucket,
-  [Parameter(Mandatory = $true)][string]$ArtifactBucket
+  [Parameter(Mandatory = $true)][string]$GithubRepo,   # owner/repo (main repo)
+  [Parameter(Mandatory = $true)][string]$RunnerSecret  # Secret Manager id holding a GitHub PAT
 )
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$base = "C:\hanomi"
-$dl = "$base\dl"
+$base = "C:\hanomi"; $dl = "$base\dl"; $runnerDir = "C:\actions-runner"
 New-Item -ItemType Directory -Force -Path $base, $dl | Out-Null
 
 function Add-MachinePath($p) {
   $cur = [Environment]::GetEnvironmentVariable("Path", "Machine")
-  if ($cur -notlike "*$p*") {
-    [Environment]::SetEnvironmentVariable("Path", "$cur;$p", "Machine")
-  }
+  if ($cur -notlike "*$p*") { [Environment]::SetEnvironmentVariable("Path", "$cur;$p", "Machine") }
   $env:Path = "$env:Path;$p"
 }
-
-# Resilient download: installer downloads over Cloud NAT occasionally drop
-# ("connection forcibly closed"); retry with backoff so a transient blip doesn't
-# abort the whole bootstrap.
 function Download-WithRetry($url, $out) {
   for ($i = 1; $i -le 5; $i++) {
-    try {
-      Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 120
-      if ((Get-Item $out).Length -gt 0) { return }
-    } catch {
-      Write-Host "download attempt $i failed: $($_.Exception.Message)"
-    }
+    try { Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing -TimeoutSec 180
+          if ((Get-Item $out).Length -gt 0) { return } } catch { Write-Host "dl attempt $i: $($_.Exception.Message)" }
     Start-Sleep -Seconds ($i * 5)
   }
-  throw "failed to download $url after 5 attempts"
+  throw "failed to download $url"
+}
+function Resolve-Gcloud {
+  $c = Get-Command gcloud -ErrorAction SilentlyContinue; if ($c) { return $c.Source }
+  foreach ($p in @(
+    "C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
+    "C:\Program Files\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd")) { if (Test-Path $p) { return $p } }
+  return "gcloud"
 }
 
 # --- Docker EE (Windows containers) ---
-# Step 1: enable the Containers Windows feature. This REQUIRES a reboot to take
-# effect. If so, reboot now and exit — GCE re-runs this startup script on the
-# next boot, where the feature is active and we proceed to install Docker. This
-# makes a fresh VM self-heal with no manual step.
 $feat = Get-WindowsFeature -Name Containers
 if (-not $feat.Installed) {
   $r = Install-WindowsFeature -Name Containers
   if ($r.RestartNeeded -ne 'No') {
-    Write-Host "Containers feature installed; rebooting to finish (startup re-runs on next boot)..."
-    Restart-Computer -Force
-    exit 0
+    Write-Host "Containers feature installed; rebooting (startup re-runs next boot)..."
+    Restart-Computer -Force; exit 0
   }
 }
-
-# Step 2: install the Docker engine static binaries + register the service.
 if (-not (Test-Path "C:\Program Files\docker\dockerd.exe")) {
   Download-WithRetry "https://download.docker.com/win/static/stable/x86_64/docker-26.1.4.zip" "$dl\docker.zip"
   Expand-Archive "$dl\docker.zip" -DestinationPath "C:\Program Files" -Force
   & "C:\Program Files\docker\dockerd.exe" --register-service 2>$null
 }
 Add-MachinePath "C:\Program Files\docker"
+Set-Service docker -StartupType Automatic -ErrorAction SilentlyContinue
 Start-Service docker -ErrorAction SilentlyContinue
-# Wait for the Docker engine to accept connections before the reconcile uses it.
-for ($i = 0; $i -lt 30; $i++) {
-  & "C:\Program Files\docker\docker.exe" version *> $null
-  if ($LASTEXITCODE -eq 0) { break }
-  Start-Sleep -Seconds 3
-}
 
-# --- Git (silent) ---
-if (-not (Test-Path "C:\Program Files\Git\cmd\git.exe")) {
-  Download-WithRetry "https://github.com/git-for-windows/git/releases/download/v2.45.2.windows.1/Git-2.45.2-64-bit.exe" "$dl\git.exe"
-  Start-Process "$dl\git.exe" -Wait -ArgumentList "/VERYSILENT /NORESTART /NOCANCEL /SP-"
-}
-Add-MachinePath "C:\Program Files\Git\cmd"
-
-# --- Google Cloud CLI (silent, all users) ---
-if (-not (Get-Command gcloud -ErrorAction SilentlyContinue) -and -not (Test-Path "C:\gcloud\google-cloud-sdk\bin\gcloud.cmd")) {
+# --- Google Cloud CLI (to read the runner-registration PAT from Secret Manager) ---
+$gcloud = Resolve-Gcloud
+if ($gcloud -eq "gcloud" -and -not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
   Download-WithRetry "https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe" "$dl\gcloud.exe"
-  Start-Process "$dl\gcloud.exe" -Wait -ArgumentList `
-    "/S /allusers /noreporting /nostartmenu /nodesktop /InstallDir=C:\gcloud"
-}
-Add-MachinePath "C:\gcloud\google-cloud-sdk\bin"
-
-# --- Clone or update the GitOps desired-state repo ---
-$git = "C:\Program Files\Git\cmd\git.exe"
-if (-not (Test-Path "$base\deploy-state\.git")) {
-  & $git clone $StateRepoUrl "$base\deploy-state"
-} else {
-  & $git -C "$base\deploy-state" pull --ff-only
+  Start-Process "$dl\gcloud.exe" -Wait -ArgumentList "/S /allusers /noreporting /nostartmenu /nodesktop"
+  $gcloud = Resolve-Gcloud
 }
 
-# --- Machine env the reconciler reads ---
-[Environment]::SetEnvironmentVariable("STATE_BUCKET", $StateBucket, "Machine")
-[Environment]::SetEnvironmentVariable("ARTIFACT_BUCKET", $ArtifactBucket, "Machine")
+# --- GitHub Actions self-hosted runner ---
+# Already configured? (the .runner file exists once config.cmd has run) -> done.
+if (-not (Test-Path "$runnerDir\.runner")) {
+  New-Item -ItemType Directory -Force -Path $runnerDir | Out-Null
+  # Latest runner release.
+  $rel = Invoke-RestMethod "https://api.github.com/repos/actions/runner/releases/latest"
+  $asset = ($rel.assets | Where-Object { $_.name -match 'actions-runner-win-x64-.*\.zip' }).browser_download_url
+  Download-WithRetry $asset "$dl\runner.zip"
+  Expand-Archive "$dl\runner.zip" -DestinationPath $runnerDir -Force
 
-# --- Register the reconciler to run every 60s as SYSTEM ---
-$reconciler = "$base\deploy-state\deploy\windows\reconciler.ps1"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" `
-  -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$reconciler`""
-$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-  -RepetitionInterval (New-TimeSpan -Seconds 60)
-# Robust scheduling: don't pile up overlapping runs (a slow reconcile must not
-# block the next), and kill any run that hangs past 5 min. Without this, a stuck
-# instance blocks all future cycles (the bug we hit: reconciler stopped cycling).
-$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
-  -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName "HanomiReconcile" -Action $action -Trigger $trigger `
-  -Settings $settings -RunLevel Highest -User "SYSTEM" -Force | Out-Null
+  # Fetch a short-lived REGISTRATION TOKEN from GitHub using a PAT (repo scope)
+  # stored in Secret Manager — the PAT never lands on disk.
+  $pat = (& $gcloud secrets versions access latest --secret=$RunnerSecret).Trim()
+  $regTok = (Invoke-RestMethod -Method Post `
+    -Uri "https://api.github.com/repos/$GithubRepo/actions/runners/registration-token" `
+    -Headers @{ Authorization = "Bearer $pat"; "Accept" = "application/vnd.github+json" }).token
 
-# Run one reconcile NOW, directly, so the worker converges during this boot
-# rather than waiting on (and depending solely on) the scheduled task's first
-# fire. The GCE Windows startup script runs on every boot, so this also means a
-# reboot re-converges deterministically. The scheduled task then handles the
-# ongoing 60s reconcile loop.
-Write-Host "running first reconcile inline..."
-try {
-  & powershell -NoProfile -ExecutionPolicy Bypass -File "$reconciler"
-} catch {
-  Write-Host "inline reconcile error: $($_.Exception.Message)"
+  & "$runnerDir\config.cmd" --unattended --replace `
+    --url "https://github.com/$GithubRepo" --token $regTok `
+    --name "hanomi-worker" --labels "hanomi-worker" `
+    --runasservice
 }
+# Ensure the runner service is running (survives reboots).
+Get-Service actions.runner.* -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic
+Get-Service actions.runner.* -ErrorAction SilentlyContinue | Start-Service -ErrorAction SilentlyContinue
 
-Write-Host "bootstrap complete"
+Write-Host "bootstrap complete (docker + self-hosted runner)"

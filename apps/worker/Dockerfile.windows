@@ -1,24 +1,27 @@
-# Windows container image for the worker — runs natively on the Windows Server
-# 2022 VM via Docker EE (the built-in Containers feature), with no WSL.
+# Windows container image for the worker — Nano Server base (120–290MB) instead
+# of Server Core (1.8–4.8GB). The smaller base is what makes `docker pull` fast
+# and reliable on the VM; Server Core's size was the cause of the slow/hung pull.
 #
-# This is what lets the worker stay on Windows (per the brief) while removing the
-# fragile bare-image bootstrap: the VM only needs Docker + `docker run`, not a
-# python/git/gcloud install chain at boot.
-#
-# ltsc2022 must match the host's Windows Server 2022 kernel.
-FROM mcr.microsoft.com/windows/servercore:ltsc2022 AS base
-
-# Install Python 3.12 (servercore has no package manager; fetch the installer).
+# We build Python in on a Server Core builder, then copy the standalone Python
+# runtime into Nano Server (which has no installer/shell). ltsc2022 tags match
+# the GCE Windows Server 2022 host (process isolation).
+FROM mcr.microsoft.com/windows/servercore:ltsc2022 AS build
 SHELL ["powershell", "-Command", "$ErrorActionPreference='Stop';"]
-RUN Invoke-WebRequest -Uri https://www.python.org/ftp/python/3.12.4/python-3.12.4-amd64.exe -OutFile python.exe ; \
-    Start-Process .\python.exe -Wait -ArgumentList '/quiet InstallAllUsers=1 PrependPath=1' ; \
-    Remove-Item python.exe
+# Embeddable Python is a zip — no installer needed, copies cleanly into Nano.
+RUN Invoke-WebRequest -Uri https://www.python.org/ftp/python/3.12.4/python-3.12.4-embed-amd64.zip -OutFile py.zip ; \
+    Expand-Archive py.zip -DestinationPath C:\python ; \
+    Remove-Item py.zip ; \
+    # Enable site/import of installed packages (embeddable disables it by default)
+    Add-Content C:\python\python312._pth 'import site' ; \
+    Invoke-WebRequest -Uri https://bootstrap.pypa.io/get-pip.py -OutFile C:\python\get-pip.py ; \
+    C:\python\python.exe C:\python\get-pip.py
+COPY requirements.txt C:\app\requirements.txt
+RUN C:\python\python.exe -m pip install --no-cache-dir -r C:\app\requirements.txt
 
-# Forward slashes: a backslash path like C:\app gets mangled to "C:app" by the
-# build (the \a is eaten), which Docker rejects as non-absolute. C:/app is safe.
+FROM mcr.microsoft.com/windows/nanoserver:ltsc2022
+COPY --from=build C:/python C:/python
+COPY . C:/app
 WORKDIR C:/app
-COPY requirements.txt .
-RUN python -m pip install --no-cache-dir -r requirements.txt
-COPY . .
-
-ENTRYPOINT ["python", "worker.py"]
+USER ContainerUser
+ENV PATH="C:\python;C:\python\Scripts;C:\Windows\system32;C:\Windows"
+ENTRYPOINT ["C:\\python\\python.exe", "worker.py"]

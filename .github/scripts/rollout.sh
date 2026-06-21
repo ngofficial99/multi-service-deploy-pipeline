@@ -75,25 +75,16 @@ rollout() { # service flag
     return 0
   fi
   echo "▶ deploying ${svc}"
-  local img
-  if [ "$svc" = "worker" ]; then
-    # The worker is a Windows container, built by the build-worker-windows job
-    # (Linux runners can't build Windows images). Use the digest it produced.
-    img="${WORKER_IMAGE:?worker changed but WORKER_IMAGE not set by the windows build job}"
-    echo "   using windows image ${img}"
-  else
-    img="$(build_push "$svc")"
-    echo "   built ${img}"
-  fi
+  local img; img="$(build_push "$svc")"
+  echo "   built ${img}"
   set_desired "$svc" "$img"
   gate "$svc" "$img"   # non-zero return aborts (set -e); later services untouched
 }
 
-# Sequential, fail-fast. backend first (API contract), then frontend (so the UI
-# only ships once its backend is healthy), then the worker (decoupled via the DB
-# queue, so it can land last without stranding anything).
+# Linux services only. backend first (API contract), then frontend (UI only
+# ships once its backend is healthy). The Windows worker deploys separately via
+# its self-hosted runner (see the deploy-worker job in deploy.yml).
 rollout backend  "${DEPLOY_BACKEND:-false}"
 rollout frontend "${DEPLOY_FRONTEND:-false}"
-rollout worker   "${DEPLOY_WORKER:-false}"
 
 echo "🎉 rollout complete"
