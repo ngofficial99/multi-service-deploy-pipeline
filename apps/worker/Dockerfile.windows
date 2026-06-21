@@ -1,0 +1,22 @@
+# Windows container image for the worker — runs natively on the Windows Server
+# 2022 VM via Docker EE (the built-in Containers feature), with no WSL.
+#
+# This is what lets the worker stay on Windows (per the brief) while removing the
+# fragile bare-image bootstrap: the VM only needs Docker + `docker run`, not a
+# python/git/gcloud install chain at boot.
+#
+# ltsc2022 must match the host's Windows Server 2022 kernel.
+FROM mcr.microsoft.com/windows/servercore:ltsc2022 AS base
+
+# Install Python 3.12 (servercore has no package manager; fetch the installer).
+SHELL ["powershell", "-Command", "$ErrorActionPreference='Stop';"]
+RUN Invoke-WebRequest -Uri https://www.python.org/ftp/python/3.12.4/python-3.12.4-amd64.exe -OutFile python.exe ; \
+    Start-Process .\python.exe -Wait -ArgumentList '/quiet InstallAllUsers=1 PrependPath=1' ; \
+    Remove-Item python.exe
+
+WORKDIR C:\app
+COPY requirements.txt .
+RUN python -m pip install --no-cache-dir -r requirements.txt
+COPY . .
+
+ENTRYPOINT ["python", "worker.py"]

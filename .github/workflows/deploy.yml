@@ -27,9 +27,7 @@ jobs:
       frontend: ${{ steps.f.outputs.frontend }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
+        with: { submodules: recursive, fetch-depth: 0 }
       - id: f
         uses: dorny/paths-filter@v3
         with:
@@ -38,17 +36,43 @@ jobs:
             worker:   ['apps/worker/**']
             frontend: ['apps/frontend/**']
 
-  deploy:
+  # The worker is a WINDOWS container, which can only be built on a Windows host.
+  # This job builds + pushes it and outputs the immutable digest the deploy job
+  # commits to deploy-state. Runs only when the worker changed (and infra exists).
+  build-worker-windows:
     needs: changes
-    runs-on: ubuntu-latest
-    # Skip cleanly until the GCP infra exists and the repo Variables are set
-    # (WIF_PROVIDER/CI_SA come from `terraform apply` outputs). Without this the
-    # auth step errors on every push before the infrastructure is provisioned.
-    if: ${{ vars.WIF_PROVIDER != '' }}
+    if: ${{ vars.WIF_PROVIDER != '' && needs.changes.outputs.worker == 'true' }}
+    runs-on: windows-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
         with:
-          submodules: recursive
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.CI_SA }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Configure docker auth
+        run: gcloud auth configure-docker $env:REGION-docker.pkg.dev --quiet
+      - id: build
+        shell: bash
+        run: |
+          IMG="${REGISTRY}/worker:${GITHUB_SHA}"
+          docker build -q -f apps/worker/Dockerfile.windows -t "$IMG" apps/worker
+          docker push -q "$IMG"
+          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG")"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [changes, build-worker-windows]
+    # build-worker-windows is skipped when the worker didn't change; `always()`
+    # lets deploy still run, and we guard inside on success/skip.
+    if: ${{ always() && vars.WIF_PROVIDER != '' && needs.build-worker-windows.result != 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
 
       # Short-lived GCP credentials via OIDC — no stored service-account keys.
       - id: auth
@@ -62,8 +86,6 @@ jobs:
       - name: Configure docker auth
         run: gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
 
-      # Write the deploy-state repo's write-enabled deploy key to a file the
-      # rollout script uses for SSH git auth (scoped to only that repo).
       - name: Install deploy-state SSH key
         run: |
           install -m 0700 -d "$HOME/.ssh"
@@ -71,14 +93,16 @@ jobs:
           chmod 0600 "$HOME/.ssh/state_key"
           echo "STATE_SSH_KEY=$HOME/.ssh/state_key" >> "$GITHUB_ENV"
 
-      # Build-once, digest-pin, commit-to-state, then gate on actual.json.
-      # Order enforces backend -> worker -> frontend; a failed gate halts the
-      # rollout (later services are never touched).
+      # Build-once (Linux services here; the Windows worker image was built by the
+      # build-worker-windows job and passed in as WORKER_IMAGE), digest-pin,
+      # commit-to-state, then gate on actual.json. Order: backend -> frontend ->
+      # worker; a failed gate halts the rollout.
       - name: Rollout
         run: ./.github/scripts/rollout.sh
         env:
           DEPLOY_BACKEND: ${{ needs.changes.outputs.backend }}
           DEPLOY_WORKER: ${{ needs.changes.outputs.worker }}
           DEPLOY_FRONTEND: ${{ needs.changes.outputs.frontend }}
+          WORKER_IMAGE: ${{ needs.build-worker-windows.outputs.digest }}
           GIT_SHA: ${{ github.sha }}
           STATE_REPO: ${{ vars.STATE_REPO }}

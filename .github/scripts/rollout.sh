@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #
 # Gated, sequential rollout. For each CHANGED service, in order
-# (backend -> worker -> frontend):
+# (backend -> frontend -> worker):
 #
-#   1. build the image once and push it (digest-pinned)
-#   2. [worker] also publish its source tree to the artifacts bucket per digest
-#      (the Windows worker runs it as a process, not a container)
-#   3. commit the new digest to the deploy-state repo (this IS the deploy)
-#   4. gate: poll the VM's actual.json in GCS until healthy, or fail
+#   1. resolve the digest-pinned image (Linux services built here; the Windows
+#      worker image is built by the build-worker-windows job and passed in via
+#      WORKER_IMAGE)
+#   2. commit the new digest to the deploy-state repo (this IS the deploy)
+#   3. gate: poll the VM's actual.json in GCS until healthy on that digest, or fail
 #
 # A failed gate aborts the script (set -e), so later services are never touched
 # — that is the partial-rollout policy: failed service self-reverts on its VM,
 # already-deployed services stay, and undeployed services are skipped.
 set -euo pipefail
 
-: "${REGISTRY:?}" "${STATE_BUCKET:?}" "${ARTIFACT_BUCKET:?}" "${GIT_SHA:?}"
+: "${REGISTRY:?}" "${STATE_BUCKET:?}" "${GIT_SHA:?}"
 : "${STATE_REPO:?}"
 
 # Deploy-state repo is accessed over SSH using a write-enabled DEPLOY KEY scoped
@@ -36,15 +36,6 @@ build_push() { # service -> prints image@digest on stdout
   docker push -q "${REGISTRY}/${svc}:${GIT_SHA}" >/dev/null
   # Resolve the immutable digest reference we just pushed.
   docker inspect --format='{{index .RepoDigests 0}}' "${REGISTRY}/${svc}:${GIT_SHA}"
-}
-
-publish_worker_source() { # image@digest
-  # The Windows worker runs the pinned source as a Windows Service. Publish the
-  # source under a per-digest key the reconciler's install-service.ps1 syncs.
-  local img="$1"
-  local key="${img##*@}"; key="${key//[:\/]/_}"
-  gcloud storage rsync -r -x '(__pycache__|\.venv|outbox|\.pytest_cache).*' \
-    apps/worker "gs://${ARTIFACT_BUCKET}/worker/${key}" >/dev/null
 }
 
 set_desired() { # service image@digest
@@ -84,10 +75,15 @@ rollout() { # service flag
     return 0
   fi
   echo "▶ deploying ${svc}"
-  local img; img="$(build_push "$svc")"
-  echo "   built ${img}"
+  local img
   if [ "$svc" = "worker" ]; then
-    publish_worker_source "$img"
+    # The worker is a Windows container, built by the build-worker-windows job
+    # (Linux runners can't build Windows images). Use the digest it produced.
+    img="${WORKER_IMAGE:?worker changed but WORKER_IMAGE not set by the windows build job}"
+    echo "   using windows image ${img}"
+  else
+    img="$(build_push "$svc")"
+    echo "   built ${img}"
   fi
   set_desired "$svc" "$img"
   gate "$svc" "$img"   # non-zero return aborts (set -e); later services untouched

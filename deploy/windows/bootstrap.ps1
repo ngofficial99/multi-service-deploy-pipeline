@@ -1,11 +1,12 @@
 # One-time bootstrap for the Windows worker VM (invoked by the Terraform
-# windows-startup-script). Installs Python + git + gcloud, clones the
-# deploy-state repo, sets machine env, and registers the reconciler as a 60s
-# Scheduled Task. Idempotent: safe to run on every boot.
+# windows-startup-script). The worker runs as a WINDOWS CONTAINER, so the host
+# only needs Docker (Containers feature) + git + gcloud — NOT a Python install.
+# Clones the deploy-state repo, registers the reconciler as a 60s Scheduled Task,
+# and runs one reconcile inline. Idempotent: safe to run on every boot.
 #
 # NOTE: we deliberately avoid `winget` — it is NOT available to the SYSTEM
 # account in the GCE Windows Server startup-script context. We install via
-# direct silent installers instead.
+# direct silent installers / the Docker static binaries instead.
 param(
   [Parameter(Mandatory = $true)][string]$StateRepoUrl,
   [Parameter(Mandatory = $true)][string]$StateBucket,
@@ -42,14 +43,21 @@ function Download-WithRetry($url, $out) {
   throw "failed to download $url after 5 attempts"
 }
 
-# --- Python 3.12 (silent, all users) ---
-if (-not (Test-Path "C:\Python312\python.exe")) {
-  Download-WithRetry "https://www.python.org/ftp/python/3.12.4/python-3.12.4-amd64.exe" "$dl\python.exe"
-  Start-Process "$dl\python.exe" -Wait -ArgumentList `
-    "/quiet InstallAllUsers=1 PrependPath=1 TargetDir=C:\Python312 Include_launcher=0"
+# --- Docker EE (Windows containers) ---
+# Enable the Containers feature + install the Docker engine static binaries.
+# (No Python install — the worker runs inside the container.)
+if (-not (Get-Command docker -ErrorAction SilentlyContinue) -and -not (Test-Path "C:\Program Files\docker\dockerd.exe")) {
+  if (-not (Get-WindowsFeature -Name Containers).Installed) {
+    Install-WindowsFeature -Name Containers | Out-Null  # may require a reboot; startup re-runs on every boot
+  }
+  Download-WithRetry "https://download.docker.com/win/static/stable/x86_64/docker-26.1.4.zip" "$dl\docker.zip"
+  Expand-Archive "$dl\docker.zip" -DestinationPath "C:\Program Files" -Force
+  Add-MachinePath "C:\Program Files\docker"
+  & "C:\Program Files\docker\dockerd.exe" --register-service 2>$null
+  Start-Service docker -ErrorAction SilentlyContinue
 }
-Add-MachinePath "C:\Python312"
-Add-MachinePath "C:\Python312\Scripts"
+Add-MachinePath "C:\Program Files\docker"
+Start-Service docker -ErrorAction SilentlyContinue
 
 # --- Git (silent) ---
 if (-not (Test-Path "C:\Program Files\Git\cmd\git.exe")) {
