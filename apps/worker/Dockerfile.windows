@@ -15,7 +15,12 @@ SHELL ["powershell", "-Command", "$ErrorActionPreference='Stop';"]
 RUN Invoke-WebRequest -Uri https://www.python.org/ftp/python/3.12.4/python-3.12.4-embed-amd64.zip -OutFile py.zip ; \
     Expand-Archive py.zip -DestinationPath C:/python ; \
     Remove-Item py.zip ; \
+    # Embeddable Python's ._pth FULLY controls sys.path and ignores PYTHONPATH.
+    # Add the app dir + site-packages here so `import config` (and pip'd psycopg)
+    # resolve. `import site` enables site-packages.
     Add-Content C:/python/python312._pth 'import site' ; \
+    Add-Content C:/python/python312._pth 'Lib\site-packages' ; \
+    Add-Content C:/python/python312._pth 'C:\app' ; \
     Invoke-WebRequest -Uri https://bootstrap.pypa.io/get-pip.py -OutFile C:/python/get-pip.py ; \
     C:/python/python.exe C:/python/get-pip.py
 COPY requirements.txt C:/app/requirements.txt
