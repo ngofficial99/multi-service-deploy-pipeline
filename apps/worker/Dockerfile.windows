@@ -14,7 +14,9 @@ RUN Invoke-WebRequest -Uri https://www.python.org/ftp/python/3.12.4/python-3.12.
     Start-Process .\python.exe -Wait -ArgumentList '/quiet InstallAllUsers=1 PrependPath=1' ; \
     Remove-Item python.exe
 
-WORKDIR C:\app
+# Forward slashes: a backslash path like C:\app gets mangled to "C:app" by the
+# build (the \a is eaten), which Docker rejects as non-absolute. C:/app is safe.
+WORKDIR C:/app
 COPY requirements.txt .
 RUN python -m pip install --no-cache-dir -r requirements.txt
 COPY . .
