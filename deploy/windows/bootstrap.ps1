@@ -82,12 +82,24 @@ if (-not (Test-Path "$runnerDir\.runner")) {
     -Uri "https://api.github.com/repos/$GithubRepo/actions/runners/registration-token" `
     -Headers @{ Authorization = "Bearer $pat"; "Accept" = "application/vnd.github+json" }).token
 
+  # Run the runner service as LocalSystem. The default (NetworkService) cannot
+  # access the Docker named pipe (\\.\pipe\docker_engine is ACL'd to
+  # Administrators/SYSTEM only), so deploy-worker's `docker pull/run` got
+  # "Access is denied". SYSTEM has pipe access. (The daemon.json "group":"docker"
+  # workaround does NOT work on Windows — verified.)
   & "$runnerDir\config.cmd" --unattended --replace `
     --url "https://github.com/$GithubRepo" --token $regTok `
     --name "hanomi-worker" --labels "hanomi-worker" `
-    --runasservice
+    --runasservice --windowslogonaccount "NT AUTHORITY\SYSTEM"
 }
-# Ensure the runner service is running (survives reboots).
+# Ensure the runner service runs as SYSTEM (covers an already-configured runner
+# that was registered as NetworkService) + auto-starts and is running.
+$svc = Get-CimInstance Win32_Service -Filter "Name LIKE 'actions.runner.%'" -ErrorAction SilentlyContinue
+if ($svc -and $svc.StartName -ne "LocalSystem") {
+  & sc.exe config $svc.Name obj= "LocalSystem" | Out-Null
+  & sc.exe failure $svc.Name reset= 60 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+  Restart-Service $svc.Name -ErrorAction SilentlyContinue
+}
 Get-Service actions.runner.* -ErrorAction SilentlyContinue | Set-Service -StartupType Automatic
 Get-Service actions.runner.* -ErrorAction SilentlyContinue | Start-Service -ErrorAction SilentlyContinue
 
