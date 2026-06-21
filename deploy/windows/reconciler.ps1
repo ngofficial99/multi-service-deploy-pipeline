@@ -20,6 +20,22 @@ $bucket    = [Environment]::GetEnvironmentVariable("STATE_BUCKET", "Machine")
 $gcsState  = "gs://$bucket/state/worker/actual.json"
 $desired   = ""
 
+# Resolve tools to ABSOLUTE paths. The scheduled task / startup context may not
+# have the machine PATH, and the gcloud silent installer ignores /InstallDir and
+# lands in "Program Files (x86)\Google\Cloud SDK". Search PATH then known spots.
+function Resolve-Exe($name, $candidates) {
+  $c = Get-Command $name -ErrorAction SilentlyContinue
+  if ($c) { return $c.Source }
+  foreach ($p in $candidates) { if (Test-Path $p) { return $p } }
+  return $name
+}
+$GCLOUD = Resolve-Exe "gcloud" @(
+  "C:\Program Files (x86)\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
+  "C:\Program Files\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd",
+  "C:\gcloud\google-cloud-sdk\bin\gcloud.cmd"
+)
+$DOCKER = Resolve-Exe "docker" @("C:\Program Files\docker\docker.exe")
+
 function Write-Log($m) { Write-Host "[reconciler/worker] $m" }
 
 function Report($healthy, $sha, $err) {
@@ -30,7 +46,7 @@ function Report($healthy, $sha, $err) {
   } | ConvertTo-Json -Compress
   $tmp = Join-Path $env:TEMP "actual.json"
   Set-Content -Path $tmp -Value $obj -Encoding ascii
-  & gcloud storage cp $tmp $gcsState --quiet
+  & $GCLOUD storage cp $tmp $gcsState --quiet
 }
 
 function Registry-Login($image) {
@@ -38,18 +54,18 @@ function Registry-Login($image) {
   $host_ = ($image -split "/")[0]
   $token = (Invoke-RestMethod -Headers @{ "Metadata-Flavor" = "Google" } `
     -Uri "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token").access_token
-  $token | docker login -u oauth2accesstoken --password-stdin "https://$host_" 2>&1 | Out-Null
+  $token | & $DOCKER login -u oauth2accesstoken --password-stdin "https://$host_" 2>&1 | Out-Null
 }
 
 function Deploy-Worker($image) {
   Write-Log "deploying $image"
   # Secrets -> env file (UTF-8 no-BOM; passed to the container via --env-file).
-  $secret = (& gcloud secrets versions access latest --secret="hanomi-worker-env" 2>$null) -join "`n"
+  $secret = (& $GCLOUD secrets versions access latest --secret="hanomi-worker-env" 2>$null) -join "`n"
   [IO.File]::WriteAllText($envFile, $secret, (New-Object Text.UTF8Encoding($false)))
   Registry-Login $image
-  docker pull $image
-  docker rm -f $ctr 2>$null | Out-Null
-  docker run -d --name $ctr --restart unless-stopped --env-file $envFile $image | Out-Null
+  & $DOCKER pull $image
+  & $DOCKER rm -f $ctr 2>$null | Out-Null
+  & $DOCKER run -d --name $ctr --restart unless-stopped --env-file $envFile $image | Out-Null
 }
 
 function Test-WorkerHealthy {
@@ -57,7 +73,7 @@ function Test-WorkerHealthy {
   # it each cycle; we read it from inside the container (it has psycopg + the DSN).
   for ($i = 0; $i -lt 30; $i++) {
     try {
-      $age = docker exec $ctr python heartbeat_age.py 2>$null
+      $age = & $DOCKER exec $ctr python heartbeat_age.py 2>$null
       if ($age -and [int]$age -lt 60) { return $true }
     } catch { }
     Start-Sleep -Seconds 3
