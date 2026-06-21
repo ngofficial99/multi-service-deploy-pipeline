@@ -53,24 +53,27 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.CI_SA }}
       - uses: google-github-actions/setup-gcloud@v3
-      # windows-latest defaults Docker to LINUX-container mode; building a Windows
-      # image needs the Windows engine. Switch it and wait for the daemon.
-      - name: Switch Docker to Windows containers
+      # windows-latest (Windows Server 2022) runs Docker with the Windows engine
+      # by default (Moby) — no Docker Desktop / engine-switch needed. Just confirm
+      # the daemon is reachable and that it's in Windows-container mode.
+      - name: Verify Docker (Windows engine)
         shell: pwsh
         run: |
-          & "$env:ProgramFiles\Docker\Docker\DockerCli.exe" -SwitchWindowsEngine
           for ($i=0; $i -lt 30; $i++) { docker version *> $null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 3 }
+          docker version --format '{{.Server.Os}}'   # expect: windows
       - name: Configure docker auth
         shell: pwsh
         run: gcloud auth configure-docker "$env:REGION-docker.pkg.dev" --quiet
       - id: build
-        shell: bash
+        shell: pwsh
         run: |
-          IMG="${REGISTRY}/worker:${GITHUB_SHA}"
-          docker build -f apps/worker/Dockerfile.windows -t "$IMG" apps/worker
-          docker push "$IMG"
-          DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG")"
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          $IMG = "$env:REGISTRY/worker:$env:GITHUB_SHA"
+          docker build -f apps/worker/Dockerfile.windows -t $IMG apps/worker
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          docker push $IMG
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $DIGEST = docker inspect --format='{{index .RepoDigests 0}}' $IMG
+          "digest=$DIGEST" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
   deploy:
     needs: [changes, build-worker-windows]
