@@ -145,12 +145,17 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          # --- Capture the CURRENTLY-running image as last-good, for rollback. ---
-          # The image the live container is on right now (empty on first deploy).
-          $lastGood = (docker inspect -f '{{.Config.Image}}' hanomi-worker 2>$null)
-          if ($LASTEXITCODE -ne 0) { $lastGood = "" }
+          # --- Read the last-KNOWN-GOOD image (rollback target). ---
+          # This is the last image that PASSED its health gate, persisted on the
+          # VM — NOT merely the currently-running image. If a previous deploy left
+          # a broken container running, "currently running" would be the broken
+          # one and rollback would revert to garbage; the last-good FILE avoids
+          # that. (Mirrors the Linux reconciler's <svc>.lastgood file.)
+          $lastGoodFile = "C:\hanomi\last-good-image.txt"
+          $lastGood = ""
+          if (Test-Path $lastGoodFile) { $lastGood = (Get-Content $lastGoodFile -Raw).Trim() }
           if ($lastGood) { Write-Host "last-good image: $lastGood" }
-          else           { Write-Host "no running container yet (first deploy) — no rollback target" }
+          else           { Write-Host "no last-good recorded yet (first healthy deploy) — no rollback target" }
 
           # --- Auth Docker to Artifact Registry via the VM's metadata SA token. ---
           $reg = ($env:IMAGE -split "/")[0]
@@ -202,7 +207,10 @@ jobs:
           docker logs hanomi-worker 2>&1 | Select-Object -Last 40
 
           if (Test-WorkerHealthy) {
-            Write-Host "✅ worker healthy on new image: $env:IMAGE"
+            # Record this image as the new last-known-good (the rollback target
+            # for the NEXT deploy). Only a gate-passing image is ever written here.
+            Set-Content -Path $lastGoodFile -Value $env:IMAGE -Encoding ascii
+            Write-Host "✅ worker healthy on new image: $env:IMAGE (recorded as last-good)"
             exit 0
           }
 
