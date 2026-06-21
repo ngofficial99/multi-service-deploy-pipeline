@@ -92,4 +92,16 @@ $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew `
 Register-ScheduledTask -TaskName "HanomiReconcile" -Action $action -Trigger $trigger `
   -Settings $settings -RunLevel Highest -User "SYSTEM" -Force | Out-Null
 
+# Run one reconcile NOW, directly, so the worker converges during this boot
+# rather than waiting on (and depending solely on) the scheduled task's first
+# fire. The GCE Windows startup script runs on every boot, so this also means a
+# reboot re-converges deterministically. The scheduled task then handles the
+# ongoing 60s reconcile loop.
+Write-Host "running first reconcile inline..."
+try {
+  & powershell -NoProfile -ExecutionPolicy Bypass -File "$reconciler"
+} catch {
+  Write-Host "inline reconcile error: $($_.Exception.Message)"
+}
+
 Write-Host "bootstrap complete"
