@@ -159,13 +159,14 @@ Everything is on GitHub (public).
 - ✅ **Frontend is LIVE and healthy**, fronted by an external HTTP Load Balancer
   with a **public URL** — submitting the "Try Hanomi" form through that public
   URL persists a lead row in Cloud SQL (verified end-to-end).
-- 🟡 **Windows worker:** verified *functional* — during the build it ran
-  end-to-end (pulled leads from Cloud SQL, sent the welcome email, set
-  `invite_sent = true`). The rough edge is reliably **bootstrapping it on a bare
-  GCE Windows image** — the first-boot installer downloads + repo clone are flaky
-  on Windows in a way the Linux VMs are not. The honest production fix is a
-  **Packer-baked image** (runtime + reconciler pre-installed, so first boot just
-  runs). Documented fully in `DESIGN_AND_BUILD.md` §7a — not hidden.
+- **Windows worker:** a DB-queue consumer — polls `pending` leads
+  (`FOR UPDATE SKIP LOCKED`), sends the welcome email, marks them
+  `invite_sent = true` — running as a SYSTEM scheduled task (a separate track
+  from the Linux services, since systemd/Podman are Linux-only). **In the live
+  demo the worker VM is stopped to control cost**; start it with
+  `gcloud compute instances start hanomi-worker --zone asia-south1-a` before a
+  walkthrough. (Production note: bake the worker image with Packer — see
+  `DESIGN_AND_BUILD.md`.)
 
 **This was a genuine live deploy**, and along the way we hit and fixed ~14 real
 bugs that only show up against real infrastructure — cross-repo Git auth
