@@ -162,16 +162,27 @@ jobs:
           gcloud secrets versions access latest --secret=hanomi-worker-env --project $env:PROJECT |
             Out-File -Encoding ascii C:\hanomi\worker.env
 
-          # Health check: the container must still be Running after a settle window.
-          # A container that crashes on startup is briefly "running" then exits, so
-          # we poll for ~30s rather than trusting a single early check.
+          # Health check over a settle window. A crash-on-startup container is a
+          # CRASH-LOOP under `--restart always`: docker keeps restarting it, so a
+          # naive `State.Running` poll can catch it momentarily "true" between
+          # restarts and wrongly pass. So we fail on ANY of:
+          #   - container not Running at a sample (caught mid-exit), OR
+          #   - RestartCount increased during the window (it's looping), OR
+          #   - the start time moved (it was replaced by a restart).
+          # Healthy = Running every sample AND zero restarts across the window.
           function Test-WorkerHealthy {
+            $startedAt0 = docker inspect -f '{{.State.StartedAt}}' hanomi-worker 2>$null
+            $rc0 = [int](docker inspect -f '{{.RestartCount}}' hanomi-worker 2>$null)
             for ($i = 0; $i -lt 6; $i++) {
               Start-Sleep -Seconds 5
-              $st = docker inspect -f '{{.State.Running}}' hanomi-worker 2>$null
-              if ($st -ne 'true') { return $false }   # exited / crashed
+              $st  = docker inspect -f '{{.State.Running}}' hanomi-worker 2>$null
+              $rc  = [int](docker inspect -f '{{.RestartCount}}' hanomi-worker 2>$null)
+              $sat = docker inspect -f '{{.State.StartedAt}}' hanomi-worker 2>$null
+              if ($st -ne 'true') { Write-Host "unhealthy: not running at sample $i"; return $false }
+              if ($rc -gt $rc0)   { Write-Host "unhealthy: crash-loop (RestartCount $rc0 -> $rc)"; return $false }
+              if ($sat -ne $startedAt0) { Write-Host "unhealthy: container restarted (StartedAt moved)"; return $false }
             }
-            return $true   # still running after the full window
+            return $true   # ran continuously, no restarts, across the full window
           }
 
           # Run a given image as the worker container.
