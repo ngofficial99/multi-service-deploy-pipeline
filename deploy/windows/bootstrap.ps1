@@ -44,20 +44,34 @@ function Download-WithRetry($url, $out) {
 }
 
 # --- Docker EE (Windows containers) ---
-# Enable the Containers feature + install the Docker engine static binaries.
-# (No Python install — the worker runs inside the container.)
-if (-not (Get-Command docker -ErrorAction SilentlyContinue) -and -not (Test-Path "C:\Program Files\docker\dockerd.exe")) {
-  if (-not (Get-WindowsFeature -Name Containers).Installed) {
-    Install-WindowsFeature -Name Containers | Out-Null  # may require a reboot; startup re-runs on every boot
+# Step 1: enable the Containers Windows feature. This REQUIRES a reboot to take
+# effect. If so, reboot now and exit — GCE re-runs this startup script on the
+# next boot, where the feature is active and we proceed to install Docker. This
+# makes a fresh VM self-heal with no manual step.
+$feat = Get-WindowsFeature -Name Containers
+if (-not $feat.Installed) {
+  $r = Install-WindowsFeature -Name Containers
+  if ($r.RestartNeeded -ne 'No') {
+    Write-Host "Containers feature installed; rebooting to finish (startup re-runs on next boot)..."
+    Restart-Computer -Force
+    exit 0
   }
+}
+
+# Step 2: install the Docker engine static binaries + register the service.
+if (-not (Test-Path "C:\Program Files\docker\dockerd.exe")) {
   Download-WithRetry "https://download.docker.com/win/static/stable/x86_64/docker-26.1.4.zip" "$dl\docker.zip"
   Expand-Archive "$dl\docker.zip" -DestinationPath "C:\Program Files" -Force
-  Add-MachinePath "C:\Program Files\docker"
   & "C:\Program Files\docker\dockerd.exe" --register-service 2>$null
-  Start-Service docker -ErrorAction SilentlyContinue
 }
 Add-MachinePath "C:\Program Files\docker"
 Start-Service docker -ErrorAction SilentlyContinue
+# Wait for the Docker engine to accept connections before the reconcile uses it.
+for ($i = 0; $i -lt 30; $i++) {
+  & "C:\Program Files\docker\docker.exe" version *> $null
+  if ($LASTEXITCODE -eq 0) { break }
+  Start-Sleep -Seconds 3
+}
 
 # --- Git (silent) ---
 if (-not (Test-Path "C:\Program Files\Git\cmd\git.exe")) {

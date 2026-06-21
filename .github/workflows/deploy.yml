@@ -53,14 +53,22 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.CI_SA }}
       - uses: google-github-actions/setup-gcloud@v3
+      # windows-latest defaults Docker to LINUX-container mode; building a Windows
+      # image needs the Windows engine. Switch it and wait for the daemon.
+      - name: Switch Docker to Windows containers
+        shell: pwsh
+        run: |
+          & "$env:ProgramFiles\Docker\Docker\DockerCli.exe" -SwitchWindowsEngine
+          for ($i=0; $i -lt 30; $i++) { docker version *> $null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 3 }
       - name: Configure docker auth
-        run: gcloud auth configure-docker $env:REGION-docker.pkg.dev --quiet
+        shell: pwsh
+        run: gcloud auth configure-docker "$env:REGION-docker.pkg.dev" --quiet
       - id: build
         shell: bash
         run: |
           IMG="${REGISTRY}/worker:${GITHUB_SHA}"
-          docker build -q -f apps/worker/Dockerfile.windows -t "$IMG" apps/worker
-          docker push -q "$IMG"
+          docker build -f apps/worker/Dockerfile.windows -t "$IMG" apps/worker
+          docker push "$IMG"
           DIGEST="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMG")"
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
