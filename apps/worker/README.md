@@ -27,3 +27,6 @@ surfaced in the frontend as a "worker online" indicator.
 
 `python -m pytest` — unit tests use a fake DB and a recording sender, so they
 need no database or SMTP server.
+
+
+test 1
