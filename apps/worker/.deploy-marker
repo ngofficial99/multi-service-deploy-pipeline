@@ -16,3 +16,4 @@
 # pythonpath fix 2026-06-21T20:01:20Z
 # _pth fix 2026-06-21T20:09:50Z
 # retry build (transient hosted-runner docker daemon hiccup) 2026-06-21T20:13:33Z
+# rebuild into re-created registry 2026-06-26T12:00Z
